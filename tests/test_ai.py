@@ -232,6 +232,50 @@ def _install_fake_gemini_client(monkeypatch, response_text):
     return fake_client_holder
 
 
+class _FlakyGeminiModels:
+    """Consumes one `outcome` per generate_content call: an Exception
+    instance is raised, anything else is returned as `response.text`."""
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls: list[dict] = []
+
+    def generate_content(self, *, model, contents, config):
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        class _Response:
+            text = outcome
+        return _Response()
+
+
+def _install_flaky_gemini_client(monkeypatch, outcomes):
+    import google.genai as genai
+    fake_client_holder = {}
+
+    def _factory(api_key):
+        class _Client:
+            def __init__(self):
+                self.models = _FlakyGeminiModels(outcomes)
+        client = _Client()
+        fake_client_holder["client"] = client
+        return client
+
+    monkeypatch.setattr(genai, "Client", _factory)
+    return fake_client_holder
+
+
+def _server_error(status="UNAVAILABLE", code=503, message="high demand"):
+    from google.genai import errors
+    return errors.ServerError(code, {"error": {"code": code, "message": message, "status": status}})
+
+
+def _client_error(status="INVALID_ARGUMENT", code=400, message="invalid argument"):
+    from google.genai import errors
+    return errors.ClientError(code, {"error": {"code": code, "message": message, "status": status}})
+
+
 def test_gemini_provider_uses_response_json_schema_not_response_schema(monkeypatch):
     """A/C: the request must be built with response_json_schema carrying the
     full CommitteeResult JSON schema, and response_schema must NOT be set
@@ -332,6 +376,202 @@ def test_gemini_provider_default_model_is_gemini_3_6_flash(monkeypatch):
 
     provider = GeminiProvider()
     assert provider.model == "gemini-3.6-flash"
+
+
+def _no_sleep_calls(monkeypatch):
+    """Mocks time.sleep so retry-backoff tests run instantly and deterministically."""
+    calls = []
+    monkeypatch.setattr("core.ai.time.sleep", lambda seconds: calls.append(seconds))
+    return calls
+
+
+def test_gemini_provider_succeeds_first_attempt_no_retry_no_sleep(monkeypatch):
+    """A: the golden path is untouched -- one call, no sleep, when the first
+    attempt already succeeds."""
+    from core.ai import GeminiProvider
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    sleeps = _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(monkeypatch, outcomes=[json.dumps(VALID, ensure_ascii=False)])
+
+    provider = GeminiProvider()
+    text = provider.generate("prompt text", CommitteeResult.model_json_schema())
+
+    assert text == json.dumps(VALID, ensure_ascii=False)
+    assert len(holder["client"].models.calls) == 1
+    assert sleeps == []
+
+
+def test_gemini_provider_retries_once_on_503_then_succeeds(monkeypatch):
+    """B: one transient 503, then success -- exactly two calls, exactly one
+    backoff sleep (~2s), and the result still parses normally."""
+    from core.ai import GeminiProvider
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    sleeps = _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), json.dumps(VALID, ensure_ascii=False)],
+    )
+
+    provider = GeminiProvider()
+    text = provider.generate("prompt text", CommitteeResult.model_json_schema())
+
+    assert text == json.dumps(VALID, ensure_ascii=False)
+    assert len(holder["client"].models.calls) == 2
+    assert sleeps == [2]
+    assert CommitteeResult.model_validate_json(text).chairman_decision == VALID["chairman_decision"]
+
+
+def test_gemini_provider_retries_twice_on_503_then_succeeds(monkeypatch):
+    """C: two transient 503s, then success -- exactly three calls, exactly
+    two backoff sleeps (~2s, ~5s), and the result still parses normally."""
+    from core.ai import GeminiProvider
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    sleeps = _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), _server_error(), json.dumps(VALID, ensure_ascii=False)],
+    )
+
+    provider = GeminiProvider()
+    text = provider.generate("prompt text", CommitteeResult.model_json_schema())
+
+    assert text == json.dumps(VALID, ensure_ascii=False)
+    assert len(holder["client"].models.calls) == 3
+    assert sleeps == [2, 5]
+    assert CommitteeResult.model_validate_json(text).chairman_decision == VALID["chairman_decision"]
+
+
+def test_gemini_provider_fails_closed_after_three_503s(monkeypatch, caplog):
+    """D: 503 on every one of the 3 attempts -- exactly three calls, exactly
+    two sleeps (none after the final attempt), fail closed by re-raising the
+    ServerError, and the existing final diagnostic logging still fires
+    (via run_ai_analysis's stage=generate_content handler)."""
+    from core.ai import GeminiProvider
+    from google.genai import errors
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    sleeps = _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), _server_error(), _server_error()],
+    )
+
+    provider = GeminiProvider()
+    with pytest.raises(errors.ServerError):
+        provider.generate("prompt text", CommitteeResult.model_json_schema())
+
+    assert len(holder["client"].models.calls) == 3
+    assert sleeps == [2, 5]
+
+
+def test_run_ai_analysis_fails_closed_after_three_503s_logs_final_failure(monkeypatch, caplog, mixed_result, tmp_path):
+    """D (full path): after exhausting retries, run_ai_analysis's existing
+    stage=generate_content diagnostic logging must still fire exactly once,
+    with no leaked secrets."""
+    caplog.set_level(logging.WARNING, logger="canam.ai")
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    _no_sleep_calls(monkeypatch)
+    _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), _server_error(), _server_error()],
+    )
+
+    with pytest.raises(Exception):
+        run_ai_analysis(mixed_result, cache_dir=tmp_path)
+
+    messages = [r.getMessage() for r in caplog.records]
+    retry_messages = [m for m in messages if "transient failure" in m]
+    final_messages = [m for m in messages if m.startswith("AI provider failure:")]
+    assert len(retry_messages) == 2
+    assert "attempt=1/3" in retry_messages[0]
+    assert "attempt=2/3" in retry_messages[1]
+    assert len(final_messages) == 1
+    assert "stage=generate_content" in final_messages[0]
+    assert "test-key-not-real" not in "\n".join(messages)
+
+
+def test_gemini_provider_does_not_retry_on_400_invalid_argument(monkeypatch):
+    """E: a permanent 400 INVALID_ARGUMENT must fail closed immediately --
+    exactly one call, zero retries, zero sleeps."""
+    from core.ai import GeminiProvider
+    from google.genai import errors
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    sleeps = _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(monkeypatch, outcomes=[_client_error()])
+
+    provider = GeminiProvider()
+    with pytest.raises(errors.ClientError):
+        provider.generate("prompt text", CommitteeResult.model_json_schema())
+
+    assert len(holder["client"].models.calls) == 1
+    assert sleeps == []
+
+
+def test_gemini_provider_does_not_retry_on_401_auth_error(monkeypatch):
+    """F: an authentication/permanent error must not be retried either --
+    exactly one call, no retry."""
+    from core.ai import GeminiProvider
+    from google.genai import errors
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    sleeps = _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_client_error(status="UNAUTHENTICATED", code=401, message="invalid API key")],
+    )
+
+    provider = GeminiProvider()
+    with pytest.raises(errors.ClientError):
+        provider.generate("prompt text", CommitteeResult.model_json_schema())
+
+    assert len(holder["client"].models.calls) == 1
+    assert sleeps == []
+
+
+def test_gemini_provider_does_not_retry_on_403_permission_denied(monkeypatch):
+    """F: 403 permission-denied is likewise a permanent error, not retried."""
+    from core.ai import GeminiProvider
+    from google.genai import errors
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    sleeps = _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_client_error(status="PERMISSION_DENIED", code=403, message="forbidden")],
+    )
+
+    provider = GeminiProvider()
+    with pytest.raises(errors.ClientError):
+        provider.generate("prompt text", CommitteeResult.model_json_schema())
+
+    assert len(holder["client"].models.calls) == 1
+    assert sleeps == []
+
+
+def test_gemini_provider_invalid_json_after_retry_still_fails_closed(monkeypatch, caplog, mixed_result, tmp_path):
+    """G + H: a retry that eventually returns a schema-invalid JSON payload
+    must still fail closed at response_parse (retries only apply to the
+    transport-level 503, never to a Pydantic validation failure)."""
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    _no_sleep_calls(monkeypatch)
+    _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), json.dumps({"made_up": "facts"})],
+    )
+
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, cache_dir=tmp_path)
+    assert len(caplog.records) == 1
+    assert "stage=response_parse" in caplog.records[0].getMessage()
 
 
 def test_run_ai_analysis_end_to_end_with_gemini_provider_succeeds(monkeypatch, caplog, mixed_result, tmp_path):

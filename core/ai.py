@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Protocol
@@ -70,6 +71,18 @@ def _log_ai_failure(exc: Exception, *, provider: str, model: str, stage: str) ->
     )
 
 
+def _log_ai_retry(exc: Exception, *, provider: str, model: str, status, attempt: int, max_attempts: int) -> None:
+    """Server-side only diagnostic for a single retried transient failure
+    (not yet a final failure -- _log_ai_failure still fires separately if
+    every attempt is exhausted). No message/details are logged here since
+    a transient 5xx is expected and recoverable; only status/attempt."""
+    logger.warning(
+        "AI provider transient failure: provider=%s model=%s stage=generate_content "
+        "status=%s attempt=%d/%d retrying=True",
+        provider, model, status, attempt, max_attempts,
+    )
+
+
 class CommitteeMember(BaseModel):
     model_config = ConfigDict(extra="forbid")
     role: Literal["macro", "portfolio", "risk", "valuation_data", "tax", "action_rebalancing"]
@@ -121,6 +134,13 @@ class ProviderUnavailable(RuntimeError):
     pass
 
 
+# Attempt 1 = original request, attempt 2/3 = retries -- 3 total attempts max.
+# Backoff is the wait *after* an attempt fails: ~2s after attempt 1, ~5s after
+# attempt 2, no wait after the final attempt (it just raises).
+_GEMINI_MAX_ATTEMPTS = 3
+_GEMINI_RETRY_BACKOFF_SECONDS = (2, 5)
+
+
 class GeminiProvider:
     name = "gemini"
 
@@ -134,6 +154,7 @@ class GeminiProvider:
 
     def generate(self, prompt: str, schema: dict) -> str:
         from google.genai import types
+        from google.genai import errors as genai_errors
         if self.model.startswith("gemini-3"):
             # Gemini 3.x rejects legacy sampling params (temperature/top_p/top_k)
             # and the old thinking_budget field with 400 INVALID_ARGUMENT;
@@ -143,24 +164,40 @@ class GeminiProvider:
         else:
             generation_kwargs = {"temperature": 0}
             thinking_config = types.ThinkingConfig(thinking_budget=0)
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                # CommitteeResult.model_json_schema() is standard JSON Schema
-                # (it uses `additionalProperties`, `$defs`, etc. via Pydantic's
-                # extra="forbid"). `response_schema` only accepts the legacy
-                # OpenAPI-3.0 Schema subset and rejects those keywords with a
-                # 400 INVALID_ARGUMENT; `response_json_schema` is the SDK's
-                # JSON-Schema-compatible field for exactly this case.
-                response_mime_type="application/json", response_json_schema=schema,
-                thinking_config=thinking_config,
-                **generation_kwargs,
-            ),
+        config = types.GenerateContentConfig(
+            # CommitteeResult.model_json_schema() is standard JSON Schema
+            # (it uses `additionalProperties`, `$defs`, etc. via Pydantic's
+            # extra="forbid"). `response_schema` only accepts the legacy
+            # OpenAPI-3.0 Schema subset and rejects those keywords with a
+            # 400 INVALID_ARGUMENT; `response_json_schema` is the SDK's
+            # JSON-Schema-compatible field for exactly this case.
+            response_mime_type="application/json", response_json_schema=schema,
+            thinking_config=thinking_config,
+            **generation_kwargs,
         )
-        if not getattr(response, "text", None):
-            raise ProviderUnavailable("empty provider response")
-        return response.text
+        for attempt in range(1, _GEMINI_MAX_ATTEMPTS + 1):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model, contents=prompt, config=config,
+                )
+            except genai_errors.ServerError as exc:
+                # ServerError is the SDK's own classification for 5xx (a
+                # transient service-side failure, e.g. 503 UNAVAILABLE under
+                # high demand). ClientError (4xx: bad request, auth, invalid
+                # key) is a distinct subclass and is never caught here, so it
+                # always fails closed immediately without retry.
+                if attempt >= _GEMINI_MAX_ATTEMPTS:
+                    raise
+                _log_ai_retry(
+                    exc, provider=self.name, model=self.model,
+                    status=getattr(exc, "code", None), attempt=attempt, max_attempts=_GEMINI_MAX_ATTEMPTS,
+                )
+                time.sleep(_GEMINI_RETRY_BACKOFF_SECONDS[attempt - 1])
+                continue
+            if not getattr(response, "text", None):
+                raise ProviderUnavailable("empty provider response")
+            return response.text
+        raise AssertionError("unreachable: loop always returns or raises")
 
 
 class AnthropicProvider:
