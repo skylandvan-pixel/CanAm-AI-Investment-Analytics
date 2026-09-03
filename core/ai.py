@@ -138,7 +138,13 @@ class GeminiProvider:
             model=self.model,
             contents=prompt,
             config=types.GenerateContentConfig(
-                temperature=0, response_mime_type="application/json", response_schema=schema,
+                # CommitteeResult.model_json_schema() is standard JSON Schema
+                # (it uses `additionalProperties`, `$defs`, etc. via Pydantic's
+                # extra="forbid"). `response_schema` only accepts the legacy
+                # OpenAPI-3.0 Schema subset and rejects those keywords with a
+                # 400 INVALID_ARGUMENT; `response_json_schema` is the SDK's
+                # JSON-Schema-compatible field for exactly this case.
+                temperature=0, response_mime_type="application/json", response_json_schema=schema,
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )

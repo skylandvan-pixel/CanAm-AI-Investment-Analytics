@@ -5,7 +5,7 @@ import logging
 
 import pytest
 
-from core.ai import ProviderUnavailable, _redact, portfolio_fingerprint, run_ai_analysis
+from core.ai import CommitteeResult, ProviderUnavailable, _redact, portfolio_fingerprint, run_ai_analysis
 from core.auth import validate_beta_code
 
 
@@ -174,3 +174,115 @@ def test_redact_strips_generic_credential_shapes():
     assert _redact("Authorization: Bearer abcdefghijklmnop1234567890") == "[REDACTED]"
     assert _redact("") == ""
     assert _redact("no secrets here") == "no secrets here"
+
+
+# --- Gemini structured-output regression (response_json_schema fix) ------
+
+def _schema_contains_additional_properties(schema) -> bool:
+    """CommitteeResult uses ConfigDict(extra="forbid"), which makes Pydantic
+    emit `additionalProperties` in its JSON Schema -- this is exactly the
+    keyword the production error named as unsupported by `response_schema`."""
+    if isinstance(schema, dict):
+        if "additionalProperties" in schema:
+            return True
+        return any(_schema_contains_additional_properties(v) for v in schema.values())
+    if isinstance(schema, list):
+        return any(_schema_contains_additional_properties(v) for v in schema)
+    return False
+
+
+def test_committee_schema_contains_additional_properties():
+    """Sanity check that the exact production failure condition is real:
+    the generated schema does contain additionalProperties, so the fix must
+    route it through a field that supports that JSON Schema keyword."""
+    schema = CommitteeResult.model_json_schema()
+    assert _schema_contains_additional_properties(schema)
+
+
+class _FakeGeminiModels:
+    """Records the exact call shape GeminiProvider sends to the real SDK's
+    generate_content, without making any network call."""
+
+    def __init__(self, response_text):
+        self.response_text = response_text
+        self.calls: list[dict] = []
+
+    def generate_content(self, *, model, contents, config):
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        class _Response:
+            text = self.response_text
+        return _Response()
+
+
+class _FakeGeminiClient:
+    def __init__(self, api_key, *, response_text):
+        self.models = _FakeGeminiModels(response_text)
+
+
+def _install_fake_gemini_client(monkeypatch, response_text):
+    import google.genai as genai
+    fake_client_holder = {}
+
+    def _factory(api_key):
+        client = _FakeGeminiClient(api_key, response_text=response_text)
+        fake_client_holder["client"] = client
+        return client
+
+    monkeypatch.setattr(genai, "Client", _factory)
+    return fake_client_holder
+
+
+def test_gemini_provider_uses_response_json_schema_not_response_schema(monkeypatch):
+    """A/C: the request must be built with response_json_schema carrying the
+    full CommitteeResult JSON schema, and response_schema must NOT be set
+    at the same time (the SDK requires exactly one of the two)."""
+    from core.ai import GeminiProvider
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    holder = _install_fake_gemini_client(monkeypatch, response_text=json.dumps(VALID, ensure_ascii=False))
+
+    provider = GeminiProvider()
+    schema = CommitteeResult.model_json_schema()
+    text = provider.generate("prompt text", schema)
+
+    assert text == json.dumps(VALID, ensure_ascii=False)
+    call = holder["client"].models.calls[0]
+    assert call["model"] == "gemini-2.5-flash"
+    config = call["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_json_schema == schema
+    assert config.response_schema is None
+
+
+def test_run_ai_analysis_end_to_end_with_gemini_provider_succeeds(monkeypatch, caplog, mixed_result, tmp_path):
+    """D + F: a valid mocked Gemini response parses to CommitteeResult through
+    the full run_ai_analysis path (configured_provider -> GeminiProvider ->
+    generate -> validation), and no failure is logged on success."""
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    _install_fake_gemini_client(monkeypatch, response_text=json.dumps(VALID, ensure_ascii=False))
+
+    result, meta = run_ai_analysis(mixed_result, cache_dir=tmp_path)
+    assert result.chairman_decision == VALID["chairman_decision"]
+    assert meta["provider"] == "gemini" and meta["model"] == "gemini-2.5-flash"
+    assert caplog.records == []
+
+
+def test_run_ai_analysis_with_gemini_provider_still_fails_closed_on_bad_json(monkeypatch, caplog, mixed_result, tmp_path):
+    """E + F: a schema-violating Gemini response must still raise
+    ProviderUnavailable (fail closed, validation not weakened), and the
+    diagnostic logger must still capture it at stage=response_parse."""
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    _install_fake_gemini_client(monkeypatch, response_text=json.dumps({"made_up": "facts"}))
+
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, cache_dir=tmp_path)
+    assert len(caplog.records) == 1
+    assert "stage=response_parse" in caplog.records[0].getMessage()
+    assert "provider=gemini" in caplog.records[0].getMessage()
