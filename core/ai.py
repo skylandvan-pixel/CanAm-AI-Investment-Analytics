@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Protocol
@@ -11,6 +13,61 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from core.analytics import canonical_fact_packet
 from core.models import AnalyticsResult
+
+logger = logging.getLogger("canam.ai")
+
+# Exact secret env vars this app configures. Their *values* are redacted from
+# logs, never their presence -- see _redact() and _log_ai_failure().
+_SECRET_ENV_VARS = ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", "CANAM_BETA_CODES")
+
+# Generic shapes for API keys / bearer tokens, as a defense-in-depth backstop
+# in case a provider SDK ever echoes a credential back inside an exception
+# message we didn't anticipate.
+_REDACTION_PATTERNS = tuple(re.compile(p) for p in (
+    r"(?i)bearer\s+[A-Za-z0-9\-_.]{10,}",
+    r"(?i)authorization\s*:\s*\S+",
+    r"AIza[0-9A-Za-z_\-]{10,}",
+    r"sk-ant-[A-Za-z0-9_\-]{10,}",
+    r"sk-[A-Za-z0-9]{10,}",
+    r"gh[po]_[A-Za-z0-9]{10,}",
+    r"AKIA[0-9A-Z]{16}",
+))
+
+
+def _redact(text: str) -> str:
+    """Best-effort redaction for server-side diagnostic logs only -- never
+    shown to end users. Strips any currently-configured secret value that
+    appears verbatim in the text, plus common API-key/Bearer-token shapes.
+    The secret values themselves are never logged, only whether each is
+    configured (see _log_ai_failure)."""
+    if not text:
+        return text
+    redacted = text
+    for var in _SECRET_ENV_VARS:
+        value = os.getenv(var)
+        if not value:
+            continue
+        for piece in value.split(","):
+            piece = piece.strip()
+            if piece:
+                redacted = redacted.replace(piece, "[REDACTED]")
+    for pattern in _REDACTION_PATTERNS:
+        redacted = pattern.sub("[REDACTED]", redacted)
+    return redacted
+
+
+def _log_ai_failure(exc: Exception, *, provider: str, model: str, stage: str) -> None:
+    """Server-side only diagnostic (Streamlit Cloud captures stderr in its
+    Logs panel). Never raises, never re-formats exc for the caller -- the
+    caller still re-raises the original exception unchanged, so this is
+    purely additive observability, not a behavior change."""
+    logger.error(
+        "AI provider failure: provider=%s model=%s stage=%s exception=%s message=%s "
+        "ai_provider_env=%s gemini_model_env=%s gemini_key_present=%s anthropic_key_present=%s",
+        provider, model, stage, type(exc).__name__, _redact(str(exc)),
+        os.getenv("AI_PROVIDER", ""), os.getenv("GEMINI_MODEL", ""),
+        bool(os.getenv("GEMINI_API_KEY")), bool(os.getenv("ANTHROPIC_API_KEY")),
+    )
 
 
 class CommitteeMember(BaseModel):
@@ -145,7 +202,15 @@ def run_ai_analysis(
 ) -> tuple[CommitteeResult | None, dict]:
     """The only API-call boundary. Call this only from an explicit user action."""
     fingerprint = portfolio_fingerprint(result)
-    provider = provider or configured_provider()
+    if provider is None:
+        try:
+            provider = configured_provider()
+        except Exception as exc:
+            # Failed before we even know which provider/model was selected --
+            # e.g. AI_PROVIDER unset/unsupported, or the key check inside the
+            # provider's own constructor.
+            _log_ai_failure(exc, provider=os.getenv("AI_PROVIDER", "?"), model="?", stage="provider_init")
+            raise
     cache_path = cache_dir / f"{fingerprint}-{provider.name}-{provider.model}.json"
     if use_cache and cache_path.exists():
         try:
@@ -154,10 +219,15 @@ def run_ai_analysis(
         except (OSError, KeyError, json.JSONDecodeError, ValidationError):
             pass
     packet = canonical_fact_packet(result)
-    raw = provider.generate(_prompt(packet), CommitteeResult.model_json_schema())
+    try:
+        raw = provider.generate(_prompt(packet), CommitteeResult.model_json_schema())
+    except Exception as exc:
+        _log_ai_failure(exc, provider=provider.name, model=provider.model, stage="generate_content")
+        raise
     try:
         parsed = CommitteeResult.model_validate_json(raw)
     except ValidationError as exc:
+        _log_ai_failure(exc, provider=provider.name, model=provider.model, stage="response_parse")
         raise ProviderUnavailable("AI response failed schema validation") from exc
     meta = {
         "provider": provider.name, "model": provider.model, "fingerprint": fingerprint,

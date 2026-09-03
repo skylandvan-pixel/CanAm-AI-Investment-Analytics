@@ -422,6 +422,32 @@ def test_page3_beta_code_fails_closed_when_unconfigured(monkeypatch):
     assert app.session_state["ai_unlocked"] is False
 
 
+def test_ai_provider_failure_shows_only_generic_message_never_raw_exception(monkeypatch):
+    """Diagnostic patch guard: whatever a Gemini/Anthropic failure actually
+    is server-side (model, quota, network, SDK...), the public UI must keep
+    showing only the generic 'AI 分析当前不可用。' string -- never the raw
+    provider exception text or type name."""
+    import core.ai
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("simulated: 404 model not found: models/gemini-3.5-flash")
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _raise)
+    app = _app()  # first run: default demo-state init happens, incl. ai_unlocked=False
+    app.session_state["ai_unlocked"] = True  # then override, so the init block doesn't reset it
+    nav = app.segmented_control(key="primary_nav")
+    nav.set_value("3 · AI 投资委员会").run(timeout=20)
+    btn = next(b for b in app.button if b.label == "启动 AI 投资委员会")
+    btn.click().run(timeout=20)
+    assert not app.exception
+    joined = "\n".join(i.value for i in app.info)
+    assert "AI 分析当前不可用" in joined
+    assert "model not found" not in joined
+    assert "gemini-3.5-flash" not in joined
+    assert "RuntimeError" not in joined
+    assert app.session_state["ai_error"] == "RuntimeError"
+
+
 def test_apply_holdings_commits_exactly_the_frame_it_is_given():
     """Guards 'editing imported quantity -> analyze uses edited quantity':
     the single Analyze button always calls _apply_holdings(edited), and

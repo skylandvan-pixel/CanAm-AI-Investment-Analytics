@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
-from core.ai import ProviderUnavailable, portfolio_fingerprint, run_ai_analysis
+from core.ai import ProviderUnavailable, _redact, portfolio_fingerprint, run_ai_analysis
 from core.auth import validate_beta_code
 
 
@@ -86,3 +87,90 @@ def test_api_unavailable_without_key(monkeypatch, mixed_result, tmp_path):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with pytest.raises(ProviderUnavailable):
         run_ai_analysis(mixed_result, cache_dir=tmp_path)
+
+
+class _RaisingProvider:
+    name = "fake"
+    model = "test-model"
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def generate(self, prompt, schema):
+        raise self._exc
+
+
+def test_generate_content_failure_is_logged_with_stage(caplog, mixed_result, tmp_path):
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    provider = _RaisingProvider(RuntimeError("simulated: model not found"))
+    with pytest.raises(RuntimeError):
+        run_ai_analysis(mixed_result, provider=provider, cache_dir=tmp_path)
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert "stage=generate_content" in message
+    assert "provider=fake" in message
+    assert "model=test-model" in message
+    assert "exception=RuntimeError" in message
+    assert "simulated: model not found" in message
+
+
+def test_provider_init_failure_is_logged(caplog, monkeypatch, mixed_result, tmp_path):
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    monkeypatch.setenv("AI_PROVIDER", "not-a-real-provider")
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, cache_dir=tmp_path)
+    assert len(caplog.records) == 1
+    assert "stage=provider_init" in caplog.records[0].getMessage()
+
+
+def test_response_parse_failure_is_logged(caplog, mixed_result, tmp_path):
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, provider=FakeProvider({"made_up": "facts"}), cache_dir=tmp_path)
+    assert len(caplog.records) == 1
+    assert "stage=response_parse" in caplog.records[0].getMessage()
+
+
+def test_successful_run_emits_no_failure_log(caplog, mixed_result, tmp_path):
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    run_ai_analysis(mixed_result, provider=FakeProvider(), cache_dir=tmp_path)
+    assert caplog.records == []
+
+
+def test_ai_failure_log_never_contains_full_fact_packet(caplog, mixed_result, tmp_path):
+    """The diagnostic log must never become a portfolio-data dump: only the
+    exception, provider/model/stage, and boolean key-presence flags."""
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    provider = _RaisingProvider(RuntimeError("boom"))
+    with pytest.raises(RuntimeError):
+        run_ai_analysis(mixed_result, provider=provider, cache_dir=tmp_path)
+    message = caplog.records[0].getMessage()
+    assert str(round(mixed_result.portfolio_score)) not in message or "portfolio_score" not in message
+    assert "top_direct" not in message and "true_exposures" not in message
+
+
+def test_secrets_are_redacted_from_ai_failure_logs(caplog, monkeypatch, mixed_result, tmp_path):
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyFAKESECRETVALUE1234567890")
+    monkeypatch.setenv("CANAM_BETA_CODES", "SUPER-SECRET-BETA-CODE")
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    provider = _RaisingProvider(RuntimeError(
+        "request failed: Authorization: Bearer AIzaSyFAKESECRETVALUE1234567890, "
+        "beta code SUPER-SECRET-BETA-CODE was in the payload"
+    ))
+    with pytest.raises(RuntimeError):
+        run_ai_analysis(mixed_result, provider=provider, cache_dir=tmp_path)
+    message = caplog.records[0].getMessage()
+    assert "AIzaSyFAKESECRETVALUE1234567890" not in message
+    assert "SUPER-SECRET-BETA-CODE" not in message
+    assert "Bearer" not in message
+    assert "[REDACTED]" in message
+    # Presence is reported as a boolean, never the value.
+    assert "gemini_key_present=True" in message
+
+
+def test_redact_strips_generic_credential_shapes():
+    assert _redact("token AIzaSyABCDEFGHIJKLMNOPQRSTUV1234567") == "token [REDACTED]"
+    assert _redact("key sk-ant-abcdefghijklmnopqrstuvwxyz123456") == "key [REDACTED]"
+    assert _redact("Authorization: Bearer abcdefghijklmnop1234567890") == "[REDACTED]"
+    assert _redact("") == ""
+    assert _redact("no secrets here") == "no secrets here"
