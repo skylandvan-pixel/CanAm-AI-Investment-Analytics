@@ -46,7 +46,7 @@ This is the canonical project document for future development. It describes only
 - Verified partial coverage messaging
 - Deterministic risk flags
 
-### Page 3 — AI 投资分析与行动方案（AI Analysis & Action Plan）
+### Page 3 — AI 投资委员会（AI Investment Committee）
 
 Free vs Pro membership presentation (see sections D/E below).
 
@@ -177,7 +177,7 @@ A Layer 2 (AI) failure must never break Layer 1. Layer 1 must remain fully funct
 ## J. Providers
 
 - **Market / reference data:** `yfinance` (Yahoo Finance) — used for live quotes and USD/CAD FX. This is an active dependency.
-- **AI (Layer 2, optional):** Gemini (`google-genai`) is the default provider (`AI_PROVIDER=gemini`); Anthropic (`anthropic`) is a configurable alternative (`AI_PROVIDER=anthropic`). Neither is called unless a user has unlocked Pro and explicitly clicks "启动 AI 投资委员会" — page navigation and reruns never trigger an API call.
+- **AI (Layer 2, optional):** Gemini (`google-genai`) is the default provider (`AI_PROVIDER=gemini`), production model `gemini-3.6-flash`; Anthropic (`anthropic`) is a configurable alternative (`AI_PROVIDER=anthropic`). Neither is called unless a user has unlocked Pro and explicitly clicks "启动 AI 投资委员会" — page navigation and reruns never trigger an API call. Gemini calls retry automatically (bounded, with backoff) on transient 5xx/high-demand errors; permanent errors (4xx: invalid request, auth) fail closed immediately without retry.
 
 ---
 
@@ -210,6 +210,14 @@ Release baseline (MVP v1.0):
 0 failed
 ```
 
+Current baseline (canam-mvp-v1.0.4 / canam-mvp-final):
+
+```
+147 passed
+1 skipped
+0 failed
+```
+
 Also verified:
 
 - Desktop browser acceptance passed
@@ -227,4 +235,20 @@ Also verified:
 - No production subscription management.
 - Pro access during Beta is invitation-code only (`CANAM_BETA_CODES`).
 - External market/reference data availability depends on the `yfinance`/Yahoo Finance provider.
+- Gemini may experience temporary 5xx/high-demand errors; bounded automatic retry absorbs most transient cases, but Layer 2 still depends on external provider availability.
 - Public Beta may reveal additional edge cases not covered by the current test suite.
+
+---
+
+## O. FINAL MVP STATUS
+
+- **MVP frozen date:** 2026-09-03
+- **Production URL:** https://canam-ai-investment.streamlit.app
+- **Repository:** https://github.com/skylandvan-pixel/CanAm-AI-Investment-Analytics
+- **Latest validated release:** `canam-mvp-v1.0.4`, frozen baseline tag `canam-mvp-final`
+- **Production Layer 1:** PASS
+- **Production Layer 2:** PASS
+- **Final tests:** 147 passed, 1 skipped, 0 failed
+- **Feature freeze status:** FROZEN — see [docs/FINAL_MVP_RELEASE.md](FINAL_MVP_RELEASE.md) for the freeze declaration and change-classification rules
+
+**Known non-blocking limitations** (see section N for the full list): partial third-party ETF holdings coverage; Gemini may experience temporary 5xx high-demand errors (mitigated by bounded retry); AI depends on external provider availability; Pro is Beta-code gated, not a paid subscription; no account persistence/database; no trade execution. None of these are release blockers.
