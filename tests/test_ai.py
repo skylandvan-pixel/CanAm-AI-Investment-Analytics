@@ -253,6 +253,85 @@ def test_gemini_provider_uses_response_json_schema_not_response_schema(monkeypat
     assert config.response_mime_type == "application/json"
     assert config.response_json_schema == schema
     assert config.response_schema is None
+    # Pre-Gemini-3 models keep the legacy sampling/thinking-budget shape.
+    assert config.temperature == 0
+    assert config.thinking_config.thinking_budget == 0
+    assert config.thinking_config.thinking_level is None
+
+
+def test_gemini_3_provider_uses_thinking_level_and_drops_temperature(monkeypatch):
+    """Regression test for the production 400 INVALID_ARGUMENT: gemini-3.x
+    rejects temperature and thinking_budget, so gemini-3.6-flash (and any
+    other gemini-3* model) must be sent without temperature, without
+    thinking_budget, and with thinking_level="minimal" instead -- while still
+    preserving response_json_schema/response_mime_type and never falling
+    back to the legacy response_schema field."""
+    from google.genai import types
+    from core.ai import GeminiProvider
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    holder = _install_fake_gemini_client(monkeypatch, response_text=json.dumps(VALID, ensure_ascii=False))
+
+    provider = GeminiProvider()
+    schema = CommitteeResult.model_json_schema()
+    text = provider.generate("prompt text", schema)
+
+    assert text == json.dumps(VALID, ensure_ascii=False)
+    call = holder["client"].models.calls[0]
+    assert call["model"] == "gemini-3.6-flash"
+    config = call["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_json_schema == schema
+    assert config.response_schema is None
+    assert config.temperature is None
+    assert config.thinking_config.thinking_budget is None
+    assert config.thinking_config.thinking_level == types.ThinkingLevel.MINIMAL
+
+
+def test_run_ai_analysis_end_to_end_with_gemini_3_provider_succeeds(monkeypatch, caplog, mixed_result, tmp_path):
+    """A + B + C: the full run_ai_analysis path also works end-to-end against
+    the gemini-3.6-flash request shape, with a mocked SDK call (no network)
+    and no diagnostic failure logged on success."""
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    _install_fake_gemini_client(monkeypatch, response_text=json.dumps(VALID, ensure_ascii=False))
+
+    result, meta = run_ai_analysis(mixed_result, cache_dir=tmp_path)
+    assert result.chairman_decision == VALID["chairman_decision"]
+    assert meta["provider"] == "gemini" and meta["model"] == "gemini-3.6-flash"
+    assert caplog.records == []
+
+
+def test_run_ai_analysis_with_gemini_3_provider_still_fails_closed_on_bad_json(monkeypatch, caplog, mixed_result, tmp_path):
+    """D + E + F: a schema-violating gemini-3.6-flash response must still
+    raise ProviderUnavailable and still be diagnosed at stage=response_parse."""
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    _install_fake_gemini_client(monkeypatch, response_text=json.dumps({"made_up": "facts"}))
+
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, cache_dir=tmp_path)
+    assert len(caplog.records) == 1
+    assert "stage=response_parse" in caplog.records[0].getMessage()
+    assert "provider=gemini" in caplog.records[0].getMessage()
+
+
+def test_gemini_provider_default_model_is_gemini_3_6_flash(monkeypatch):
+    """G: the canonical default (used when GEMINI_MODEL is unset) must match
+    the current production target, not a stale placeholder."""
+    from core.ai import GeminiProvider
+
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    _install_fake_gemini_client(monkeypatch, response_text="{}")
+
+    provider = GeminiProvider()
+    assert provider.model == "gemini-3.6-flash"
 
 
 def test_run_ai_analysis_end_to_end_with_gemini_provider_succeeds(monkeypatch, caplog, mixed_result, tmp_path):

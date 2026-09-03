@@ -125,7 +125,7 @@ class GeminiProvider:
     name = "gemini"
 
     def __init__(self):
-        self.model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+        self.model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
         key = os.getenv("GEMINI_API_KEY")
         if not key:
             raise ProviderUnavailable("GEMINI_API_KEY not configured")
@@ -134,6 +134,15 @@ class GeminiProvider:
 
     def generate(self, prompt: str, schema: dict) -> str:
         from google.genai import types
+        if self.model.startswith("gemini-3"):
+            # Gemini 3.x rejects legacy sampling params (temperature/top_p/top_k)
+            # and the old thinking_budget field with 400 INVALID_ARGUMENT;
+            # thinking_level is the Gemini 3.x replacement.
+            generation_kwargs = {}
+            thinking_config = types.ThinkingConfig(thinking_level="minimal")
+        else:
+            generation_kwargs = {"temperature": 0}
+            thinking_config = types.ThinkingConfig(thinking_budget=0)
         response = self.client.models.generate_content(
             model=self.model,
             contents=prompt,
@@ -144,8 +153,9 @@ class GeminiProvider:
                 # OpenAPI-3.0 Schema subset and rejects those keywords with a
                 # 400 INVALID_ARGUMENT; `response_json_schema` is the SDK's
                 # JSON-Schema-compatible field for exactly this case.
-                temperature=0, response_mime_type="application/json", response_json_schema=schema,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
+                response_mime_type="application/json", response_json_schema=schema,
+                thinking_config=thinking_config,
+                **generation_kwargs,
             ),
         )
         if not getattr(response, "text", None):
