@@ -69,6 +69,38 @@ def inject_theme() -> None:
     .pricing-features { display:flex; flex-direction:column; gap:.6rem; margin:1.1rem 0 1.2rem; }
     .pricing-feature { display:flex; gap:.55rem; align-items:flex-start; color:#102A43; font-size:.86rem; line-height:1.4; }
     .pricing-check { color:#3B6690; font-weight:700; flex:0 0 auto; }
+    /* --- Action Plan (Page 3) only --- */
+    .ap-donow-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; margin:.7rem 0; }
+    .ap-list { margin:.4rem 0 0; padding:0; list-style:none; display:flex; flex-direction:column; gap:.45rem; }
+    .ap-list li { font-size:.88rem; line-height:1.4; color:#102A43; padding-left:1.1rem; position:relative; }
+    .ap-do-now li:before { content:"✓"; color:#3B6690; position:absolute; left:0; font-weight:700; }
+    .ap-do-not li:before { content:"✕"; color:#8AA0B8; position:absolute; left:0; font-weight:700; }
+    .ap-priority { display:inline-block; border-radius:99px; padding:.12rem .6rem; font-size:.72rem; font-weight:700; }
+    .ap-priority-high { background:#FBE3E3; color:#C92A2A; }
+    .ap-priority-medhigh { background:#FCEEDC; color:#B5651D; }
+    .ap-priority-med { background:#EEF4FF; color:#3B6690; }
+    .ap-priority-low { background:#EAF0F8; color:#58708D; }
+    .ap-security-card { background:#FFF; border:1px solid #E2EAF4; border-radius:14px; padding:.9rem 1.05rem; margin:.55rem 0; }
+    .ap-security-head { display:flex; align-items:center; justify-content:space-between; gap:.6rem; }
+    .ap-security-ticker { color:#102A43; font-weight:760; font-size:1rem; }
+    .ap-security-action { color:#3B6690; font-weight:700; font-size:.86rem; margin-top:.1rem; }
+    .ap-security-meta { color:#58708D; font-size:.82rem; line-height:1.45; margin-top:.4rem; }
+    .ap-security-meta b { color:#40566F; }
+    .ap-timeline-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1rem; margin:.6rem 0; }
+    .ap-timeline-card { background:#FFF; border:1px solid #E2EAF4; border-radius:14px; padding:.9rem 1rem; }
+    .ap-timeline-title { color:#3B6690; font-size:.76rem; font-weight:720; letter-spacing:.06em; }
+    .ap-timeline-objective { color:#102A43; font-weight:700; font-size:.88rem; margin:.3rem 0 .5rem; line-height:1.4; }
+    .ap-timeline-card ul.ap-list li { font-size:.82rem; color:#40566F; }
+    .ap-timeline-card ul.ap-list li:before { content:"–"; color:#9FB8C9; }
+    .ap-timeline-trigger { color:#8AA0B8; font-size:.78rem; margin-top:.5rem; line-height:1.4; }
+    .ap-calendar-row { display:grid; grid-template-columns:6.2rem 1fr 4.4rem; gap:.7rem; align-items:start; padding:.5rem 0; border-top:1px solid #EEF2F8; }
+    .ap-calendar-row:first-child { border-top:none; }
+    .ap-calendar-date { color:#58708D; font-size:.8rem; font-variant-numeric:tabular-nums; }
+    .ap-calendar-event { color:#102A43; font-size:.86rem; font-weight:700; }
+    .ap-calendar-reassess { color:#58708D; font-size:.8rem; margin-top:.15rem; }
+    .ap-checklist { margin:.4rem 0 0; padding:0; list-style:none; display:flex; flex-direction:column; gap:.5rem; }
+    .ap-checklist li { font-size:.86rem; color:#102A43; padding-left:1.3rem; position:relative; line-height:1.4; }
+    .ap-checklist li:before { content:"☐"; color:#3B6690; position:absolute; left:0; }
     @media(max-width: 720px) {
       .block-container { padding:1rem .85rem 3rem; }
       .brand-title { font-size:1.75rem; }
@@ -77,10 +109,12 @@ def inject_theme() -> None:
       .true-grid,.member-grid { grid-template-columns:1fr; }
       .rank-row { grid-template-columns:1.1rem 2.8rem 1fr 3.2rem; }
       .etf-row { grid-template-columns:2.9rem 1fr 3.8rem; }
+      .ap-donow-grid,.ap-timeline-grid { grid-template-columns:1fr; }
     }
     @media(min-width:721px) and (max-width:1000px) {
       .metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); row-gap:.8rem; }
       .true-grid,.member-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .ap-timeline-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
     }
     </style>
     """, unsafe_allow_html=True)
@@ -257,7 +291,121 @@ def committee_view(ai_result) -> None:
     st.markdown(f'<div class="quiet-card" style="margin-top:1rem"><b>多数意见（Majority View）</b><br>{ai_result.majority_view}<br><br><b>主要关切（Main Concern）</b><br>{ai_result.main_concern}</div>', unsafe_allow_html=True)
     st.markdown('<div class="section-label">主席决策（Chairman Decision）</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="quiet-card"><b>{ai_result.chairman_decision}</b></div>', unsafe_allow_html=True)
+    _render_action_plan(ai_result.action_plan)
+
+
+_PRIORITY_CSS = {"高": "ap-priority-high", "中高": "ap-priority-medhigh", "中": "ap-priority-med", "低": "ap-priority-low"}
+_TIMELINE_LABELS = [
+    ("now", "现在（Now）"), ("next_30_days", "未来30天（Next 30 Days）"),
+    ("next_3_months", "未来3个月（Next 3 Months）"), ("next_6_12_months", "未来6–12个月（6–12 Months）"),
+]
+
+
+def _render_action_plan(plan) -> None:
     st.markdown('<div class="section-label">条件式行动方案（Action Plan）</div>', unsafe_allow_html=True)
-    labels = {"now": "现在（Now）", "one_month": "一个月（1 Month）", "three_month": "三个月（3 Months）"}
-    for action in ai_result.actions:
-        st.markdown(f'<div class="plan-step"><b>{labels[action.horizon]}</b><br><small>如果（IF）</small> {action.trigger}<br><small>则（THEN）</small> {action.action}<br><span style="color:#58708D">{action.reason}</span></div>', unsafe_allow_html=True)
+
+    st.markdown(f'<div class="quiet-card"><b>当前总策略（Strategy Now）</b><br>{plan.strategy_now}</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-label">本阶段最重要的几件事（Top Changes）</div>', unsafe_allow_html=True)
+    items = "".join(f"<li>{c}</li>" for c in plan.top_changes)
+    st.markdown(f'<div class="quiet-card"><ol style="margin:0;padding-left:1.2rem">{items}</ol></div>', unsafe_allow_html=True)
+
+    do_now = "".join(f"<li>{d}</li>" for d in plan.do_now)
+    do_not = "".join(f"<li>{d}</li>" for d in plan.do_not_now)
+    st.markdown(
+        f'<div class="ap-donow-grid">'
+        f'<div class="quiet-card"><b>现在做（Do Now）</b><ul class="ap-list ap-do-now">{do_now}</ul></div>'
+        f'<div class="quiet-card"><b>现在不做（Do Not Do Now）</b><ul class="ap-list ap-do-not">{do_not}</ul></div>'
+        f'</div>', unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="section-label">标的级行动（Security Actions）</div>', unsafe_allow_html=True)
+    for action in plan.security_actions:
+        meta_lines = []
+        if action.target:
+            meta_lines.append(f"<b>目标</b> {action.target}")
+        if action.execution_style:
+            meta_lines.append(f"<b>执行方式</b> {action.execution_style}")
+        if action.trigger:
+            meta_lines.append(f"<b>触发条件</b> {action.trigger}")
+        if action.pause_condition:
+            meta_lines.append(f"<b>暂停条件</b> {action.pause_condition}")
+        if action.review_point:
+            meta_lines.append(f"<b>复核节点</b> {action.review_point}")
+        meta_lines.append(f"<b>理由</b> {action.reason}")
+        meta = "<br>".join(meta_lines)
+        priority_css = _PRIORITY_CSS.get(action.priority, "ap-priority-med")
+        st.markdown(
+            f'<div class="ap-security-card">'
+            f'<div class="ap-security-head"><span class="ap-security-ticker">{action.ticker}</span>'
+            f'<span class="ap-priority {priority_css}">优先级 {action.priority}</span></div>'
+            f'<div class="ap-security-action">{action.action}</div>'
+            f'<div class="ap-security-meta">{meta}</div>'
+            f'</div>', unsafe_allow_html=True,
+        )
+
+    st.markdown('<div class="section-label">组合目标迁移（Portfolio Target Migration）</div>', unsafe_allow_html=True)
+    ts = plan.target_structure
+    st.markdown(
+        f'<div class="quiet-card"><b>当前结构</b> {ts.current}<br>'
+        f'<b>3个月目标</b> {ts.next_3_months}<br><b>6–12个月目标</b> {ts.next_6_12_months}</div>',
+        unsafe_allow_html=True,
+    )
+    if plan.target_migration:
+        rows = "".join(
+            f'<div class="ap-calendar-row" style="grid-template-columns:3.6rem 1fr 1fr 1fr">'
+            f'<span class="ap-calendar-event">{row.ticker}</span>'
+            f'<span class="ap-calendar-reassess">3M {row.target_3_months or "—"}</span>'
+            f'<span class="ap-calendar-reassess">6–12M {row.target_6_12_months or "—"}</span>'
+            f'<span class="ap-calendar-reassess">{row.action}</span></div>'
+            for row in plan.target_migration
+        )
+        st.markdown(f'<div class="quiet-card" style="margin-top:.6rem">{rows}</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-label">行动时间线（Action Timeline）</div>', unsafe_allow_html=True)
+    horizon_cards = ""
+    for key, label in _TIMELINE_LABELS:
+        horizon = getattr(plan.timeline, key)
+        actions_html = "".join(f"<li>{a}</li>" for a in horizon.actions)
+        watch = f'<div class="ap-timeline-trigger">关注 {" · ".join(horizon.watch_holdings)}</div>' if horizon.watch_holdings else ""
+        horizon_cards += (
+            f'<div class="ap-timeline-card"><div class="ap-timeline-title">{label}</div>'
+            f'<div class="ap-timeline-objective">{horizon.objective}</div>'
+            f'<ul class="ap-list">{actions_html}</ul>{watch}'
+            f'<div class="ap-timeline-trigger">复核触发：{horizon.review_trigger}</div></div>'
+        )
+    st.markdown(f'<div class="ap-timeline-grid">{horizon_cards}</div>', unsafe_allow_html=True)
+
+    if plan.scenarios:
+        st.markdown('<div class="section-label">情景应对（Scenario Response）</div>', unsafe_allow_html=True)
+        for scenario in plan.scenarios:
+            label = f'<br><small style="color:#8AA0B8">{scenario.weight_label}</small>' if scenario.weight_label else ""
+            pause = f'<br><b>暂停条件</b> {scenario.pause_condition}' if scenario.pause_condition else ""
+            affected = f'<br><b>相关标的</b> {" · ".join(scenario.affected_holdings)}' if scenario.affected_holdings else ""
+            st.markdown(
+                f'<div class="quiet-card" style="margin:.55rem 0"><b>{scenario.scenario}</b>{label}'
+                f'{affected}<br><b>行动</b> {scenario.action}{pause}</div>',
+                unsafe_allow_html=True,
+            )
+
+    if plan.decision_calendar:
+        st.markdown('<div class="section-label">关键决策日历（Decision Calendar）</div>', unsafe_allow_html=True)
+        rows = "".join(
+            f'<div class="ap-calendar-row">'
+            f'<span class="ap-calendar-date">{item.date or "日期待确认"}</span>'
+            f'<div><span class="ap-calendar-event">{item.event}</span>'
+            f'<div class="ap-calendar-reassess">{item.what_to_reassess}'
+            + (f' · 关注 {" · ".join(item.affected_holdings)}' if item.affected_holdings else "") + '</div></div>'
+            f'<span>重要性 {item.importance}</span></div>'
+            for item in plan.decision_calendar
+        )
+        st.markdown(f'<div class="quiet-card">{rows}</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-label">执行清单（Execution Checklist）</div>', unsafe_allow_html=True)
+    checklist_items = "".join(f"<li>{c}</li>" for c in plan.checklist)
+    st.markdown(f'<div class="quiet-card"><ul class="ap-checklist">{checklist_items}</ul></div>', unsafe_allow_html=True)
+
+    if plan.no_change:
+        st.markdown('<div class="section-label">维持不动的仓位（No Change）</div>', unsafe_allow_html=True)
+        no_change_items = "".join(f"<li>{c}</li>" for c in plan.no_change)
+        st.markdown(f'<div class="quiet-card"><ul class="ap-list">{no_change_items}</ul></div>', unsafe_allow_html=True)

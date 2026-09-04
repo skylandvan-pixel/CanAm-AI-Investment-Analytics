@@ -90,12 +90,102 @@ class CommitteeMember(BaseModel):
     conclusion: str = Field(min_length=1, max_length=160)
 
 
-class ConditionalAction(BaseModel):
+_ACTION_LABELS = (
+    "持有", "持有并观察", "控制新增", "分批减仓", "分批增持", "分批减持", "暂缓行动", "复核",
+    "维持配置", "降低风险", "重新平衡", "回调买入", "反弹减仓", "暂不操作", "财报后再决策",
+)
+_PRIORITY_LEVELS = ("高", "中高", "中", "低")
+_CALENDAR_IMPORTANCE = ("高", "中", "低")
+# The app deliberately never sends per-share quantity/price to the AI
+# provider (see core.analytics.canonical_fact_packet -- the fact packet is a
+# minimized, aggregated-weight-only view), so the Action Plan can never
+# express a share count: only weight percentages, relative position-size
+# changes, or qualitative sizing. weight_label hard-blocks presenting a
+# scenario's subjective weighting as a statistical probability.
+_SCENARIO_WEIGHT_LABELS = ("主观情景权重", "策略情景，不代表统计概率")
+# The app has no verified event-date source (no earnings/Fed/BoC calendar
+# feed) -- this is the only value date is ever allowed to hold besides None,
+# enforced in _validate_action_plan_facts so the AI can never fabricate a
+# specific calendar date.
+_DATE_PENDING = "日期待确认"
+
+
+class SecurityAction(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    horizon: Literal["now", "one_month", "three_month"]
-    trigger: str = Field(min_length=1, max_length=180)
-    action: str = Field(min_length=1, max_length=180)
-    reason: str = Field(min_length=1, max_length=180)
+    ticker: str = Field(min_length=1, max_length=12)
+    action: Literal[_ACTION_LABELS]
+    priority: Literal[_PRIORITY_LEVELS]
+    reason: str = Field(min_length=1, max_length=200)
+    execution_style: str | None = Field(default=None, max_length=100)
+    trigger: str | None = Field(default=None, max_length=200)
+    pause_condition: str | None = Field(default=None, max_length=200)
+    review_point: str | None = Field(default=None, max_length=160)
+    target: str | None = Field(default=None, max_length=100)
+
+
+class TimelineHorizon(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    objective: str = Field(min_length=1, max_length=200)
+    actions: list[str] = Field(min_length=1, max_length=4)
+    watch_holdings: list[str] = Field(default_factory=list, max_length=5)
+    review_trigger: str = Field(min_length=1, max_length=200)
+
+
+class ActionTimeline(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    now: TimelineHorizon
+    next_30_days: TimelineHorizon
+    next_3_months: TimelineHorizon
+    next_6_12_months: TimelineHorizon
+
+
+class DecisionCalendarItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event: str = Field(min_length=1, max_length=120)
+    date: str | None = Field(default=None, max_length=20)
+    affected_holdings: list[str] = Field(default_factory=list, max_length=5)
+    importance: Literal[_CALENDAR_IMPORTANCE]
+    what_to_reassess: str = Field(min_length=1, max_length=160)
+
+
+class TargetStructure(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    current: str = Field(min_length=1, max_length=160)
+    next_3_months: str = Field(min_length=1, max_length=160)
+    next_6_12_months: str = Field(min_length=1, max_length=160)
+
+
+class TargetMigrationRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ticker: str = Field(min_length=1, max_length=12)
+    target_3_months: str | None = Field(default=None, max_length=60)
+    target_6_12_months: str | None = Field(default=None, max_length=60)
+    action: str = Field(min_length=1, max_length=100)
+
+
+class ScenarioAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scenario: str = Field(min_length=1, max_length=120)
+    weight_label: Literal[_SCENARIO_WEIGHT_LABELS] | None = None
+    affected_holdings: list[str] = Field(default_factory=list, max_length=5)
+    action: str = Field(min_length=1, max_length=160)
+    pause_condition: str | None = Field(default=None, max_length=160)
+
+
+class ActionPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    strategy_now: str = Field(min_length=1, max_length=280)
+    top_changes: list[str] = Field(min_length=1, max_length=3)
+    do_now: list[str] = Field(min_length=2, max_length=4)
+    do_not_now: list[str] = Field(min_length=2, max_length=4)
+    security_actions: list[SecurityAction] = Field(min_length=1, max_length=5)
+    target_structure: TargetStructure
+    target_migration: list[TargetMigrationRow] = Field(default_factory=list, max_length=5)
+    timeline: ActionTimeline
+    scenarios: list[ScenarioAction] = Field(default_factory=list, max_length=3)
+    decision_calendar: list[DecisionCalendarItem] = Field(default_factory=list, max_length=5)
+    checklist: list[str] = Field(min_length=5, max_length=8)
+    no_change: list[str] = Field(default_factory=list, max_length=8)
 
 
 class CommitteeResult(BaseModel):
@@ -104,7 +194,7 @@ class CommitteeResult(BaseModel):
     majority_view: str = Field(min_length=1, max_length=240)
     main_concern: str = Field(min_length=1, max_length=240)
     chairman_decision: str = Field(min_length=1, max_length=320)
-    actions: list[ConditionalAction]
+    action_plan: ActionPlan
 
     @field_validator("members")
     @classmethod
@@ -115,13 +205,41 @@ class CommitteeResult(BaseModel):
             raise ValueError("exactly six unique specialist roles are required")
         return value
 
-    @field_validator("actions")
-    @classmethod
-    def three_unique_horizons(cls, value: list[ConditionalAction]):
-        horizons = [a.horizon for a in value]
-        if len(value) > 3 or len(set(horizons)) != len(horizons):
-            raise ValueError("at most three unique horizon actions are allowed")
-        return value
+
+def _canonical_tickers(packet: dict) -> set[str]:
+    """The only tickers the AI actually saw weight/exposure data for -- the
+    Action Plan may reference these and nothing else (never an invented
+    security). Sourced entirely from the same fact packet already sent to
+    the provider; no new canonical data is introduced."""
+    return (
+        {h["ticker"] for h in packet["top_direct_holdings"]}
+        | {x["ticker"] for x in packet["top_true_exposures"]}
+    )
+
+
+def _validate_action_plan_facts(plan: ActionPlan, packet: dict) -> None:
+    """Fail-closed guardrails that a static JSON Schema cannot express on its
+    own: every ticker the Action Plan references must be one already present
+    in the canonical fact packet (never an invented security), and every
+    decision_calendar date must be either omitted or the fixed placeholder
+    string -- this app has no verified event-date source, so any other
+    value is necessarily a fabricated date."""
+    allowed = _canonical_tickers(packet)
+    referenced: set[str] = {a.ticker for a in plan.security_actions}
+    for horizon in (plan.timeline.now, plan.timeline.next_30_days, plan.timeline.next_3_months, plan.timeline.next_6_12_months):
+        referenced |= set(horizon.watch_holdings)
+    for item in plan.decision_calendar:
+        referenced |= set(item.affected_holdings)
+    for row in plan.target_migration:
+        referenced.add(row.ticker)
+    for scenario in plan.scenarios:
+        referenced |= set(scenario.affected_holdings)
+    unknown = referenced - allowed
+    if unknown:
+        raise ValueError(f"action plan referenced unverified ticker(s): {sorted(unknown)}")
+    for item in plan.decision_calendar:
+        if item.date is not None and item.date != _DATE_PENDING:
+            raise ValueError("action plan decision_calendar included a fabricated date")
 
 
 class TextProvider(Protocol):
@@ -241,9 +359,49 @@ def _prompt(packet: dict) -> str:
     return """You are the Seven-Member Investment Committee for CanAm AI Investment Analytics.
 Six specialists review one immutable deterministic fact packet; the chairman then synthesizes it.
 Use only facts in the packet. Never recalculate or change a number, invent a price/probability/tax rule,
-or describe market regime as portfolio risk. Keep each specialist to one sentence. Actions must be
-conditional IF→THEN decision support, never predictions, guarantees, orders, share counts or invented
-numeric targets. Return exactly the JSON schema. Use Chinese for conclusions and plans.
+or describe market regime as portfolio risk. Keep each specialist to one sentence. Return exactly the
+JSON schema. Use Chinese for conclusions and plans.
+
+action_plan is an execution roadmap, not a prediction. You never receive per-share quantity or price data
+(only weights/exposures), so NEVER state a specific share count -- express sizing only as a weight-percentage
+target, a relative position-size change (e.g. "减仓约当前仓位的15%-25%"), or a qualitative instruction. Prefer
+concrete, executable actions/execution_style phrasing over vague ones (avoid bare "适度优化"/"关注风险"/
+"适当调整"/"考虑再平衡" unless followed by a concrete rule of when/how). Fields:
+- strategy_now: 1-3 concise lines naming the overall action stance and the single biggest current issue.
+- top_changes: the 1-3 structural changes that actually matter this round -- prefer fewer, higher-confidence
+  changes over listing something for every holding; put everything else in no_change.
+- do_now / do_not_now: concrete investor actions and things to avoid right now -- never a system or
+  data-maintenance task (never tell the user to "improve ETF holdings data" or similar; if ETF look-through
+  coverage is incomplete per data_quality, the correct investor-facing action is to stay conservative about
+  relying on it for large rebalancing, not to ask the user to fix data).
+- security_actions: only the 3-5 holdings that most matter (put the rest in no_change, do not give every
+  holding its own entry). ticker MUST be exactly one of the tickers already listed in top_direct_holdings or
+  top_true_exposures above -- never invent a ticker or recommend a security outside this portfolio.
+  execution_style describes staging/timing (e.g. "分2-3批", "回调3%-5%后启动第一批", "财报后一周复核") --
+  never a share count. target must stay qualitative (e.g. "降至更合理区间") unless a numeric range is directly
+  justified by the concentration/exposure/effective-n figures already in the packet, and even then express it
+  as an approximate range, never spurious precision. trigger/pause_condition/review_point carry the IF/THEN
+  conditional logic per action -- do not omit it, just don't make it the whole plan.
+- target_structure: current/next_3_months/next_6_12_months, each one line describing the portfolio
+  architecture this plan is steering toward (not a per-ticker instruction -- the overall shape).
+- target_migration: only for holdings where a meaningful target actually exists (omit the rest); target_
+  3_months/target_6_12_months may be a qualitative label ("维持"/"控制新增"/"待复核") or a weight-percentage
+  range -- never spurious precision, never a share count. ticker MUST be one already listed above.
+- timeline: exactly one entry each for now / next_30_days / next_3_months / next_6_12_months, describing
+  investor actions and a re-assessment trigger for that horizon -- never an internal data/system task.
+- scenarios: at most 3, only if the risk_flags/concentration/market data actually support distinct
+  positioning per scenario -- omit entirely if not. weight_label may ONLY be omitted or exactly one of the two
+  fixed disclaimer strings given in the schema; never state a numeric probability or percentage anywhere in a
+  scenario, since these are not statistically modeled.
+- decision_calendar: only portfolio-relevant events. You have no verified event-date source, so date must be
+  either omitted or exactly the literal string "日期待确认" -- never a specific calendar date; any other date
+  value is a fabricated fact and will be rejected.
+- checklist: 5-8 concise, non-repetitive investor tasks compressing the whole plan into executable steps.
+- no_change: holdings/positions that need no action this round, and the "do not overtrade" principle where
+  relevant (e.g. "不因短期波动频繁换仓") -- this keeps the plan to a few high-confidence changes instead of
+  manufacturing an action for every position.
+If account_type is Taxable, actions and checklist should reflect tax friction (staged selling, checking cost
+basis before realizing gains) without inventing a marginal tax rate or exact tax liability.
 
 Canonical deterministic fact packet:
 """ + json.dumps(packet, ensure_ascii=False, sort_keys=True)
@@ -279,7 +437,8 @@ def run_ai_analysis(
         raise
     try:
         parsed = CommitteeResult.model_validate_json(raw)
-    except ValidationError as exc:
+        _validate_action_plan_facts(parsed.action_plan, packet)
+    except (ValidationError, ValueError) as exc:
         _log_ai_failure(exc, provider=provider.name, model=provider.model, stage="response_parse")
         raise ProviderUnavailable("AI response failed schema validation") from exc
     meta = {

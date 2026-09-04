@@ -448,6 +448,44 @@ def test_ai_provider_failure_shows_only_generic_message_never_raw_exception(monk
     assert app.session_state["ai_error"] == "RuntimeError"
 
 
+def test_action_plan_renders_all_sections_without_exception(monkeypatch):
+    """Human-acceptance smoke test for the upgraded Action Plan (Page 3):
+    a valid mocked committee result renders every new section -- Strategy
+    Now, Top Changes, Do Now/Do Not Now, Security Actions, Portfolio Target
+    Migration, Action Timeline (all 4 horizons), Execution Checklist, and
+    No Change -- with no exception, using only tickers that are real
+    holdings in the demo portfolio the app starts with."""
+    import core.ai
+    from tests.test_ai import VALID
+
+    parsed = core.ai.CommitteeResult.model_validate(VALID)
+
+    def _fake_run_ai_analysis(result, **kwargs):
+        return parsed, {"provider": "gemini", "model": "gemini-3.6-flash", "cache_hit": False}
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _fake_run_ai_analysis)
+    app = _app()
+    app.session_state["ai_unlocked"] = True
+    nav = app.segmented_control(key="primary_nav")
+    nav.set_value("3 · AI 投资委员会").run(timeout=20)
+    btn = next(b for b in app.button if b.label == "启动 AI 投资委员会")
+    btn.click().run(timeout=20)
+    assert not app.exception
+
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "当前总策略" in joined
+    assert "本阶段最重要的几件事" in joined
+    assert "现在做" in joined and "现在不做" in joined
+    assert "标的级行动" in joined
+    assert "NVDA" in joined
+    assert "组合目标迁移" in joined
+    assert "行动时间线" in joined
+    assert "未来30天" in joined and "未来3个月" in joined and "未来6–12个月" in joined
+    assert "执行清单" in joined
+    assert "维持不动的仓位" in joined
+    assert "SGOV" in joined
+
+
 def test_apply_holdings_commits_exactly_the_frame_it_is_given():
     """Guards 'editing imported quantity -> analyze uses edited quantity':
     the single Analyze button always calls _apply_holdings(edited), and
