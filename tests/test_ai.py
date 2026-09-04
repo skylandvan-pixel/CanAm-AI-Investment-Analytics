@@ -681,15 +681,20 @@ def test_gemini_provider_retries_twice_on_503_then_succeeds(monkeypatch):
 
 
 def test_gemini_provider_fails_closed_after_three_503s(monkeypatch, caplog):
-    """D: 503 on every one of the 3 attempts -- exactly three calls, exactly
-    two sleeps (none after the final attempt), fail closed by re-raising the
-    ServerError, and the existing final diagnostic logging still fires
-    (via run_ai_analysis's stage=generate_content handler)."""
+    """D: 503 on every one of the 3 primary attempts -- exactly three calls,
+    exactly two sleeps (none after the final attempt), fail closed by
+    re-raising the ServerError, and the existing final diagnostic logging
+    still fires (via run_ai_analysis's stage=generate_content handler).
+    GEMINI_FALLBACK_MODEL is pinned equal to GEMINI_MODEL here specifically
+    to isolate pure primary-retry-exhaustion behavior from the fallback
+    feature (see the same-model guard tests below) -- this is the exact
+    pre-fallback-patch scenario/assertions, unchanged."""
     from core.ai import GeminiProvider
     from google.genai import errors
 
     monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
     monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.setenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
     sleeps = _no_sleep_calls(monkeypatch)
     holder = _install_flaky_gemini_client(
         monkeypatch, outcomes=[_server_error(), _server_error(), _server_error()],
@@ -706,11 +711,14 @@ def test_gemini_provider_fails_closed_after_three_503s(monkeypatch, caplog):
 def test_run_ai_analysis_fails_closed_after_three_503s_logs_final_failure(monkeypatch, caplog, mixed_result, tmp_path):
     """D (full path): after exhausting retries, run_ai_analysis's existing
     stage=generate_content diagnostic logging must still fire exactly once,
-    with no leaked secrets."""
+    with no leaked secrets. GEMINI_FALLBACK_MODEL is pinned equal to
+    GEMINI_MODEL to isolate this from the new fallback feature -- see the
+    dedicated fallback tests below for the fallback-active scenarios."""
     caplog.set_level(logging.WARNING, logger="canam.ai")
     monkeypatch.setenv("AI_PROVIDER", "gemini")
     monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
     monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.setenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
     _no_sleep_calls(monkeypatch)
     _install_flaky_gemini_client(
         monkeypatch, outcomes=[_server_error(), _server_error(), _server_error()],
@@ -728,6 +736,267 @@ def test_run_ai_analysis_fails_closed_after_three_503s_logs_final_failure(monkey
     assert len(final_messages) == 1
     assert "stage=generate_content" in final_messages[0]
     assert "test-key-not-real" not in "\n".join(messages)
+
+
+# ---------------------------------------------------------------------------
+# Gemini 3.5 Flash fallback: only after the primary exhausts 3 attempts with
+# a confirmed 503, never on any other 5xx and never on a 4xx.
+# ---------------------------------------------------------------------------
+
+def test_gemini_provider_falls_back_once_after_three_503s(monkeypatch):
+    """4, 15: primary 503 x3 exhausted -- exactly one extra call, against
+    the default fallback model gemini-3.5-flash (GEMINI_FALLBACK_MODEL
+    unset)."""
+    from core.ai import GeminiProvider
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.delenv("GEMINI_FALLBACK_MODEL", raising=False)
+    sleeps = _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), _server_error(), _server_error(), json.dumps(VALID, ensure_ascii=False)],
+    )
+
+    provider = GeminiProvider()
+    text = provider.generate("prompt text", CommitteeResult.model_json_schema())
+
+    assert text == json.dumps(VALID, ensure_ascii=False)
+    calls = holder["client"].models.calls
+    assert len(calls) == 4
+    assert [c["model"] for c in calls] == ["gemini-3.6-flash", "gemini-3.6-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
+    assert sleeps == [2, 5]  # no extra sleep before/after the fallback attempt
+
+
+def test_run_ai_analysis_succeeds_via_fallback_after_three_503s(monkeypatch, caplog, mixed_result, tmp_path):
+    """5, 19, 22: full path -- fallback success returns a normal, validated
+    CommitteeResult, a sanitized fallback log fires, and the API key is
+    never present in any captured log message."""
+    caplog.set_level(logging.WARNING, logger="canam.ai")
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.delenv("GEMINI_FALLBACK_MODEL", raising=False)
+    _no_sleep_calls(monkeypatch)
+    _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), _server_error(), _server_error(), json.dumps(VALID, ensure_ascii=False)],
+    )
+
+    result, meta = run_ai_analysis(mixed_result, cache_dir=tmp_path)
+    assert result.chairman_decision == VALID["chairman_decision"]
+    assert meta["provider"] == "gemini"
+
+    messages = [r.getMessage() for r in caplog.records]
+    fallback_messages = [m for m in messages if m.startswith("AI provider fallback:")]
+    assert len(fallback_messages) == 1
+    assert "primary_model=gemini-3.6-flash" in fallback_messages[0]
+    assert "fallback_model=gemini-3.5-flash" in fallback_messages[0]
+    assert "primary_status=503" in fallback_messages[0]
+    assert not any(m.startswith("AI provider failure:") for m in messages)  # no failure -- fallback succeeded
+    assert "test-key-not-real" not in "\n".join(messages)
+
+
+def test_gemini_provider_fails_closed_when_fallback_also_returns_503(monkeypatch, caplog):
+    """6: primary 503 x3, fallback also 503 -- fail closed (the fallback's
+    own ServerError propagates), and the fallback-specific failure log
+    identifies gemini-3.5-flash (not the primary model) as the one that
+    actually failed last."""
+    from core.ai import GeminiProvider
+    from google.genai import errors
+
+    caplog.set_level(logging.WARNING, logger="canam.ai")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.delenv("GEMINI_FALLBACK_MODEL", raising=False)
+    _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), _server_error(), _server_error(), _server_error()],
+    )
+
+    provider = GeminiProvider()
+    with pytest.raises(errors.ServerError):
+        provider.generate("prompt text", CommitteeResult.model_json_schema())
+
+    assert len(holder["client"].models.calls) == 4
+    messages = [r.getMessage() for r in caplog.records]
+    fallback_failure = [m for m in messages if "stage=generate_content_fallback" in m]
+    assert len(fallback_failure) == 1
+    assert "model=gemini-3.5-flash" in fallback_failure[0]
+
+
+def test_gemini_provider_fails_closed_when_fallback_returns_400(monkeypatch):
+    """7: primary 503 x3, fallback returns a permanent 400 -- fail closed
+    immediately (the ClientError propagates as-is, no further retry)."""
+    from core.ai import GeminiProvider
+    from google.genai import errors
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.delenv("GEMINI_FALLBACK_MODEL", raising=False)
+    _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), _server_error(), _server_error(), _client_error()],
+    )
+
+    provider = GeminiProvider()
+    with pytest.raises(errors.ClientError):
+        provider.generate("prompt text", CommitteeResult.model_json_schema())
+
+    assert len(holder["client"].models.calls) == 4
+
+
+def test_gemini_provider_non_503_server_error_does_not_trigger_fallback(monkeypatch):
+    """13: a non-503 5xx (e.g. 500 INTERNAL) still retries 3 total primary
+    attempts exactly as before, but must NOT trigger a model fallback --
+    only a confirmed 503 does."""
+    from core.ai import GeminiProvider
+    from google.genai import errors
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.delenv("GEMINI_FALLBACK_MODEL", raising=False)
+    sleeps = _no_sleep_calls(monkeypatch)
+    internal_error = _server_error(status="INTERNAL", code=500, message="internal error")
+    holder = _install_flaky_gemini_client(
+        monkeypatch, outcomes=[internal_error, internal_error, internal_error],
+    )
+
+    provider = GeminiProvider()
+    with pytest.raises(errors.ServerError):
+        provider.generate("prompt text", CommitteeResult.model_json_schema())
+
+    assert len(holder["client"].models.calls) == 3  # no 4th (fallback) call
+    assert sleeps == [2, 5]
+
+
+def test_gemini_provider_does_not_duplicate_call_when_fallback_equals_primary(monkeypatch):
+    """14: if GEMINI_FALLBACK_MODEL == GEMINI_MODEL, do not make a duplicate
+    fallback request against the same model -- fail closed right after
+    primary exhaustion, exactly 3 calls total."""
+    from core.ai import GeminiProvider
+    from google.genai import errors
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.setenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
+    _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), _server_error(), _server_error()],
+    )
+
+    provider = GeminiProvider()
+    with pytest.raises(errors.ServerError):
+        provider.generate("prompt text", CommitteeResult.model_json_schema())
+
+    assert len(holder["client"].models.calls) == 3
+
+
+def test_gemini_fallback_model_env_var_overrides_default(monkeypatch):
+    """16: a configured GEMINI_FALLBACK_MODEL is honored instead of the
+    gemini-3.5-flash default."""
+    from core.ai import GeminiProvider
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.setenv("GEMINI_FALLBACK_MODEL", "gemini-3.7-flash")
+    _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), _server_error(), _server_error(), json.dumps(VALID, ensure_ascii=False)],
+    )
+
+    provider = GeminiProvider()
+    assert provider.fallback_model == "gemini-3.7-flash"
+    provider.generate("prompt text", CommitteeResult.model_json_schema())
+    assert holder["client"].models.calls[3]["model"] == "gemini-3.7-flash"
+
+
+def test_gemini_fallback_uses_gemini_3_compatible_config_and_same_prompt(monkeypatch):
+    """17, 18, 23: the fallback call keeps the exact same structured-output
+    config (response_mime_type/response_json_schema, thinking_level
+    "minimal", no temperature/thinking_budget) and the exact same prompt
+    string as the primary call -- no separate fallback prompt/fact packet."""
+    from core.ai import GeminiProvider
+    from google.genai import types
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.delenv("GEMINI_FALLBACK_MODEL", raising=False)
+    _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), _server_error(), _server_error(), json.dumps(VALID, ensure_ascii=False)],
+    )
+
+    provider = GeminiProvider()
+    schema = CommitteeResult.model_json_schema()
+    provider.generate("the exact same prompt text", schema)
+
+    primary_call, fallback_call = holder["client"].models.calls[0], holder["client"].models.calls[3]
+    assert fallback_call["contents"] == primary_call["contents"] == "the exact same prompt text"
+    config = fallback_call["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_json_schema == schema
+    assert config.response_schema is None
+    assert config.temperature is None
+    assert config.thinking_config.thinking_budget is None
+    assert config.thinking_config.thinking_level == types.ThinkingLevel.MINIMAL
+
+
+def test_gemini_fallback_malformed_json_still_fails_closed(monkeypatch, caplog, mixed_result, tmp_path):
+    """20: fallback succeeds at the transport level but returns invalid JSON
+    -- must still fail closed at response_parse, exactly like a primary-only
+    malformed response."""
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.delenv("GEMINI_FALLBACK_MODEL", raising=False)
+    _no_sleep_calls(monkeypatch)
+    _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), _server_error(), _server_error(), json.dumps({"made_up": "facts"})],
+    )
+
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, cache_dir=tmp_path)
+    assert any("stage=response_parse" in r.getMessage() for r in caplog.records)
+
+
+def test_gemini_fallback_unknown_ticker_action_plan_still_fails_closed(monkeypatch, mixed_result, tmp_path):
+    """21: even a fallback response that is well-formed JSON must still go
+    through the same Action Plan ticker validation -- an unverified ticker
+    fails closed exactly as it would from the primary model."""
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.delenv("GEMINI_FALLBACK_MODEL", raising=False)
+    _no_sleep_calls(monkeypatch)
+    broken = json.loads(json.dumps(VALID))
+    broken["action_plan"]["security_actions"][0]["ticker"] = "TSLA"
+    _install_flaky_gemini_client(
+        monkeypatch, outcomes=[_server_error(), _server_error(), _server_error(), json.dumps(broken, ensure_ascii=False)],
+    )
+
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, cache_dir=tmp_path)
+
+
+@pytest.mark.parametrize("status,code", [("NOT_FOUND", 404), ("RESOURCE_EXHAUSTED", 429)])
+def test_gemini_provider_does_not_retry_or_fallback_on_other_client_errors(monkeypatch, status, code):
+    """8-12: 404 (invalid/unavailable model) and 429 (quota/rate limit) are
+    ClientError like 400/401/403 -- exactly one call, no retry, no
+    fallback."""
+    from core.ai import GeminiProvider
+    from google.genai import errors
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    sleeps = _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(monkeypatch, outcomes=[_client_error(status=status, code=code, message="denied")])
+
+    provider = GeminiProvider()
+    with pytest.raises(errors.ClientError):
+        provider.generate("prompt text", CommitteeResult.model_json_schema())
+
+    assert len(holder["client"].models.calls) == 1
+    assert sleeps == []
 
 
 def test_gemini_provider_does_not_retry_on_400_invalid_argument(monkeypatch):

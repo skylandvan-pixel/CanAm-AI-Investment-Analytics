@@ -83,6 +83,19 @@ def _log_ai_retry(exc: Exception, *, provider: str, model: str, status, attempt:
     )
 
 
+def _log_ai_fallback(*, provider: str, primary_model: str, fallback_model: str, primary_status) -> None:
+    """Server-side only diagnostic: the primary model exhausted its retries
+    with a confirmed 503, so a single fallback attempt against a distinct
+    model is about to be made. Only model identifiers and the status code
+    that triggered the fallback are logged -- never the prompt, fact
+    packet, or response content."""
+    logger.warning(
+        "AI provider fallback: provider=%s primary_model=%s fallback_model=%s stage=generate_content "
+        "primary_status=%s fallback=True",
+        provider, primary_model, fallback_model, primary_status,
+    )
+
+
 class CommitteeMember(BaseModel):
     model_config = ConfigDict(extra="forbid")
     role: Literal["macro", "portfolio", "risk", "valuation_data", "tax", "action_rebalancing"]
@@ -264,25 +277,27 @@ class GeminiProvider:
 
     def __init__(self):
         self.model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+        self.fallback_model = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash")
         key = os.getenv("GEMINI_API_KEY")
         if not key:
             raise ProviderUnavailable("GEMINI_API_KEY not configured")
         from google import genai
         self.client = genai.Client(api_key=key)
 
-    def generate(self, prompt: str, schema: dict) -> str:
+    def _config(self, model: str, schema: dict):
         from google.genai import types
-        from google.genai import errors as genai_errors
-        if self.model.startswith("gemini-3"):
+        if model.startswith("gemini-3"):
             # Gemini 3.x rejects legacy sampling params (temperature/top_p/top_k)
             # and the old thinking_budget field with 400 INVALID_ARGUMENT;
-            # thinking_level is the Gemini 3.x replacement.
+            # thinking_level is the Gemini 3.x replacement. gemini-3.5-flash
+            # (the fallback) is also a Gemini 3.x model, so it takes this
+            # same branch -- no separate fallback config.
             generation_kwargs = {}
             thinking_config = types.ThinkingConfig(thinking_level="minimal")
         else:
             generation_kwargs = {"temperature": 0}
             thinking_config = types.ThinkingConfig(thinking_budget=0)
-        config = types.GenerateContentConfig(
+        return types.GenerateContentConfig(
             # CommitteeResult.model_json_schema() is standard JSON Schema
             # (it uses `additionalProperties`, `$defs`, etc. via Pydantic's
             # extra="forbid"). `response_schema` only accepts the legacy
@@ -293,28 +308,52 @@ class GeminiProvider:
             thinking_config=thinking_config,
             **generation_kwargs,
         )
+
+    def _call(self, model: str, prompt: str, schema: dict) -> str:
+        response = self.client.models.generate_content(
+            model=model, contents=prompt, config=self._config(model, schema),
+        )
+        if not getattr(response, "text", None):
+            raise ProviderUnavailable("empty provider response")
+        return response.text
+
+    def generate(self, prompt: str, schema: dict) -> str:
+        from google.genai import errors as genai_errors
         for attempt in range(1, _GEMINI_MAX_ATTEMPTS + 1):
             try:
-                response = self.client.models.generate_content(
-                    model=self.model, contents=prompt, config=config,
-                )
+                return self._call(self.model, prompt, schema)
             except genai_errors.ServerError as exc:
                 # ServerError is the SDK's own classification for 5xx (a
                 # transient service-side failure, e.g. 503 UNAVAILABLE under
                 # high demand). ClientError (4xx: bad request, auth, invalid
                 # key) is a distinct subclass and is never caught here, so it
-                # always fails closed immediately without retry.
-                if attempt >= _GEMINI_MAX_ATTEMPTS:
+                # always fails closed immediately without retry or fallback.
+                if attempt < _GEMINI_MAX_ATTEMPTS:
+                    _log_ai_retry(
+                        exc, provider=self.name, model=self.model,
+                        status=getattr(exc, "code", None), attempt=attempt, max_attempts=_GEMINI_MAX_ATTEMPTS,
+                    )
+                    time.sleep(_GEMINI_RETRY_BACKOFF_SECONDS[attempt - 1])
+                    continue
+                # Primary exhausted. Fall back to a distinct model only on a
+                # confirmed 503 (the SDK's structured status code -- never a
+                # broad ServerError/5xx match, and never a string match on
+                # the message); any other 5xx preserves the pre-fallback
+                # behavior of failing closed right here.
+                if getattr(exc, "code", None) != 503 or self.fallback_model == self.model:
                     raise
-                _log_ai_retry(
-                    exc, provider=self.name, model=self.model,
-                    status=getattr(exc, "code", None), attempt=attempt, max_attempts=_GEMINI_MAX_ATTEMPTS,
+                _log_ai_fallback(
+                    provider=self.name, primary_model=self.model,
+                    fallback_model=self.fallback_model, primary_status=exc.code,
                 )
-                time.sleep(_GEMINI_RETRY_BACKOFF_SECONDS[attempt - 1])
-                continue
-            if not getattr(response, "text", None):
-                raise ProviderUnavailable("empty provider response")
-            return response.text
+                try:
+                    return self._call(self.fallback_model, prompt, schema)
+                except Exception as fallback_exc:
+                    _log_ai_failure(
+                        fallback_exc, provider=self.name, model=self.fallback_model,
+                        stage="generate_content_fallback",
+                    )
+                    raise
         raise AssertionError("unreachable: loop always returns or raises")
 
 
