@@ -238,6 +238,25 @@ def _validate_action_plan_limits(plan: ActionPlan) -> None:
             raise ValueError(f"action plan field '{field}' had {count} items, exceeding the maximum of {limit}")
 
 
+# The exact unqualified vague-trigger phrases called out in the Action Plan
+# reduction pass (see _prompt): each is fine as part of a concrete, anchored
+# trigger, but rejected when it is the entire trigger with nothing else
+# qualifying it -- not executable on its own.
+_VAGUE_TRIGGER_PHRASES = frozenset({"逢高", "明显反弹", "适度减仓", "分阶段优化"})
+
+
+def _validate_action_plan_quality(plan: ActionPlan) -> None:
+    """Fail-closed guardrail against bare vague-trigger phrasing (product
+    reduction pass, step 1). A static JSON Schema/length check cannot express
+    "is this trigger executable" -- this only catches the specific bare
+    phrases the product review called out, so a concrete anchored trigger
+    that happens to use one of these words is never rejected."""
+    for action in plan.security_actions:
+        trigger = action.trigger.strip()
+        if trigger in _VAGUE_TRIGGER_PHRASES:
+            raise ValueError(f"action plan trigger for {action.ticker} is an unqualified vague phrase: {trigger!r}")
+
+
 class TextProvider(Protocol):
     name: str
     model: str
@@ -387,6 +406,35 @@ Use only facts in the packet. Never recalculate or change a number, invent a pri
 or describe market regime as portfolio risk. Keep each specialist to one sentence. Return exactly the
 JSON schema. Use Chinese for conclusions and plans.
 
+Coverage-aware look-through wording -- applies to every field below, not only action_plan: each
+top_true_exposures entry is built only from named ETF constituents already known to this packet; any ETF
+weight with no published holdings data, or the unnamed remainder inside a covered ETF, is simply omitted
+from that stock's true-exposure number, never guessed. So every true-exposure figure is a verified LOWER
+BOUND on the real look-through exposure, never an overstatement. When concentration.lookthrough_effective_n
+is null, or data_quality.lookthrough_coverage is "partial"/"insufficient", or data_quality.
+lookthrough_uncovered_weight is materially above 0 (roughly >0.05), phrase any true-exposure figure you
+cite as an identified lower bound -- e.g. "已识别 NVDA 穿透暴露：≥23.7%（当前可验证穿透覆盖率约XX%）" -- and
+never call it a complete or fully precise total in that case. Regardless of coverage label, a true-exposure
+figure may be stated directly without the ≥ qualifier only when that entry's indirect contribution is 0
+(i.e. it comes entirely from a direct holding, with no ETF look-through involved) -- data_quality.
+lookthrough_coverage being "complete" means every held ETF has some published constituent data, never that
+100% of that ETF's holdings are named, so it alone never justifies dropping the qualifier for any figure
+that includes an indirect/ETF-sourced component.
+
+Decision-confidence rule: decision confidence must never exceed data confidence. When look-through coverage
+is materially incomplete (see above), do not justify a major action -- a REDUCE-type security action, or a
+top_action driving a meaningful position-size change -- primarily on an incomplete true-exposure number
+treated as certain; size and justify it from the verified direct holding weight (top_direct_holdings) and
+risk_flags instead, and let the incomplete look-through figure only add color/caution. This does not mean no
+action is ever allowed under incomplete coverage -- if the direct data alone already shows meaningful
+concentration, a risk-management action grounded in that direct data is still appropriate.
+
+Fund-destination rule: never claim that moving proceeds from a reduced holding into another named ETF or
+fund meaningfully lowers that stock's or sector's concentration unless this packet's own asset_allocation or
+top_true_exposures data already supports that specific destination's effect. If the destination's
+look-through effect cannot be verified from this packet, do not name a specific replacement security -- use
+general wording such as "转向经穿透验证后能够降低集中度的资产" instead of naming a broad ETF by ticker.
+
 action_plan is a portfolio manager's execution memo, NOT another analysis report -- the committee members
 above already explain WHY; action_plan only answers WHAT to do, WHAT to avoid, WHICH holdings matter, WHEN to
 act, and WHAT would change the plan. A reader must be able to scan it in about 1-2 minutes, so stay concrete,
@@ -394,9 +442,12 @@ portfolio-specific, and short -- do not create an action for every holding, and 
 reasoning. You never receive per-share quantity or price data (only weights/exposures), so NEVER state a
 specific share count or exact trade price -- express sizing only as a weight-percentage target (e.g.
 "目标权重 8%-10%"), a relative position-size change (e.g. "反弹时分阶段减仓约15%-20%"), or a qualitative
-instruction (e.g. "维持现有仓位", "暂不追加"). Prefer concrete phrasing with a when/how rule over vague
-filler -- avoid bare "适度优化"/"关注风险"/"保持关注"/"适当调整" unless immediately followed by a concrete
-action or condition; prefer "暂不追加"/"维持"/"反弹时分阶段减仓"/"回调后分批增加"/"财报后重新评估". Fields:
+instruction (e.g. "维持现有仓位", "暂不追加"). Any specific numeric target or range you set is YOUR
+recommendation, never a deterministically computed threshold -- phrase it as "建议目标"/"建议控制区间"/"AI
+建议" rather than stating it as if the packet itself defined that number, and prefer a range over false
+precision when coverage is incomplete. Prefer concrete phrasing with a when/how rule over vague filler --
+avoid bare "适度优化"/"关注风险"/"保持关注"/"适当调整" unless immediately followed by a concrete action or
+condition; prefer "暂不追加"/"维持"/"反弹时分阶段减仓"/"回调后分批增加"/"财报后重新评估". Fields:
 - strategy_now: one concise portfolio-level line naming the overall action stance and the single biggest
   current issue.
 - top_actions: at most the 1-3 most important portfolio-level actions this round -- prefer fewer,
@@ -405,29 +456,48 @@ action or condition; prefer "暂不追加"/"维持"/"反弹时分阶段减仓"/"
   data-maintenance task (never tell the user to "improve ETF holdings data" or similar; if ETF look-through
   coverage is incomplete per data_quality, the correct investor-facing action is to stay conservative about
   relying on it for large rebalancing, not to ask the user to fix data).
-- security_actions: normally only 3-5 holdings that actually require action, monitoring, staged execution,
-  explicit restraint, or important review -- do not force every holding into this list; holdings needing no
-  action belong only in the checklist's closing "其余仓位暂维持不变" line. ticker MUST be exactly one of the
-  tickers already listed in top_direct_holdings or top_true_exposures above -- never invent a ticker or
-  recommend a security outside this portfolio. action is one of the fixed labels in the schema (e.g. HOLD,
-  WAIT, REDUCE, REDUCE_ON_REBOUND, ADD_ON_PULLBACK, STAGED_BUY, STAGED_SELL, CONTROL_ADDITIONS,
-  REVIEW_AFTER_EVENT). target is a weight range, relative position-size change, or qualitative instruction --
-  never spurious numeric precision, never a share count. trigger is one concise IF/WHEN condition (e.g.
-  "若市场回调3%-5%", "若反弹至近期压力区", "下一次财报后重新评估"). reason is one concise explanation.
+- security_actions: prefer FEWER, higher-conviction entries -- 1-3 is the common case; do not pad up to the
+  5-action maximum just to fill it. A holding that needs no real decision (already appropriately sized, no
+  new information) does not need its own entry -- fold it into the checklist's closing
+  "其余核心仓位暂维持不变" line instead. Only include a holding that genuinely needs REDUCE/ADD/staged
+  execution/explicit restraint/important review. ticker MUST be exactly one of the tickers already listed in
+  top_direct_holdings or top_true_exposures above -- never invent a ticker or recommend a security outside
+  this portfolio. action is one of the fixed labels in the schema (e.g. HOLD, WAIT, REDUCE,
+  REDUCE_ON_REBOUND, ADD_ON_PULLBACK, STAGED_BUY, STAGED_SELL, CONTROL_ADDITIONS, REVIEW_AFTER_EVENT).
+  target is a weight range, relative position-size change, or qualitative instruction -- never spurious
+  numeric precision, never a share count. trigger must describe an observable condition already inferable
+  from this packet -- a bare, unqualified "逢高"/"明显反弹"/"适度减仓"/"分阶段优化" with no concrete anchor is
+  rejected outright, so always anchor it: the position's own recent relative strength, concentration or
+  true-exposure staying above the recommended range after a market move, sector exposure staying elevated
+  after a rebound, a known upcoming earnings-type event, market-regime deterioration, or look-through
+  coverage materially improving -- never fabricate an exact price level, percentage move, or calendar date
+  not already implied by this packet. If the trigger is conditional on a market state that may never occur
+  (e.g. "反弹后减仓"), also state a time-based reassessment backstop in trigger or reason (e.g. "若X个月内
+  未出现该条件，应重新评估该持仓与集中度") -- this is a reassessment prompt, never an automatic forced trade
+  after a fixed period. reason is one concise explanation.
 - timeline_now / timeline_30_days / timeline_3_months / timeline_6_12_months: at most 2-3 concise investor
   actions per horizon (never an internal data/system task), absorbing any longer-term structural migration
   (e.g. shifting toward more core-ETF weight, trimming a concentrated position over time) into the horizon
-  where it actually belongs instead of a separate table.
-- reassessment_triggers: at most 3 portfolio-relevant events or conditions that would change this plan.
-  event_or_condition must be a description, never a specific calendar date, probability, or percentage
-  weighting -- you have no verified event-date source (e.g. "NVDA 下一次财报后", "下一次 FOMC 后", "若
-  S&P 500 出现明显回调"). affected_holdings, if any, MUST be tickers already listed above. reassess is one
-  concise line on what to reconsider.
+  where it actually belongs instead of a separate table. A horizon with nothing genuinely new to do should
+  contain one concise observational entry instead of a fabricated action -- e.g. "观察"/"暂无新增操作，等待
+  触发条件"/"仅重新评估，无需新增操作" -- never restate an action already covered in an earlier horizon just
+  to fill space.
+- reassessment_triggers: at most 3 portfolio-relevant conditions that would change this plan. Each may be
+  either a known calendar-type event (e.g. next earnings, next FOMC) or a state-based condition already
+  inferable from this packet (e.g. concentration or true-exposure remaining/worsening beyond the recommended
+  range, market-regime deterioration, look-through coverage materially improving, sector concentration
+  rising further) -- do not rely on calendar events alone, and never invent a threshold number this packet
+  does not already support. event_or_condition must be a description, never a specific calendar date,
+  probability, or percentage weighting -- you have no verified event-date source. affected_holdings, if any,
+  MUST be tickers already listed above. reassess is one concise line on what to reconsider.
 - checklist: 3-6 concise, non-repetitive investor tasks compressing the whole plan into executable steps
   (never a system/data-maintenance task); if most holdings need no action, end with one compact line such as
   "其余仓位暂维持不变" instead of listing them individually.
-If account_type is Taxable, actions and checklist should reflect tax friction (staged selling, checking cost
-basis before realizing gains) without inventing a marginal tax rate or exact tax liability.
+If account_type is Taxable, mention the resulting tax friction (staged selling, checking cost basis before
+realizing gains) in at most two places total across committee members + action_plan combined -- typically
+once where it materially shapes the chairman's decision or a specific security_action, and at most one
+checklist item if genuinely necessary -- never restate the identical tax caveat in top_actions, do_not_now,
+timeline, AND checklist all at once. Never invent a marginal tax rate or exact tax liability.
 
 Canonical deterministic fact packet:
 """ + json.dumps(packet, ensure_ascii=False, sort_keys=True)
@@ -476,6 +546,7 @@ def run_ai_analysis(
         parsed = CommitteeResult.model_validate_json(raw)
         _validate_action_plan_facts(parsed.action_plan, packet)
         _validate_action_plan_limits(parsed.action_plan)
+        _validate_action_plan_quality(parsed.action_plan)
     except (ValidationError, ValueError) as exc:
         _log_ai_failure(
             exc, provider=provider.name, model=provider.model, stage="response_parse",

@@ -48,6 +48,14 @@ VALID = {
 }
 
 
+# CommitteeResult's serialized JSON Schema, as of the pre-Step-1 baseline
+# (commit 6217d51) -- the Action Plan reduction pass is prompt/validation
+# only and must not grow this at all (see test_schema_bytes_unchanged_by_
+# reduction_pass and the Step 1 report).
+_BASELINE_SCHEMA_BYTES = 3974
+_BASELINE_SCHEMA_DEFS = 4
+
+
 class FakeProvider:
     name = "fake"
     model = "test"
@@ -484,6 +492,188 @@ def test_run_ai_analysis_fails_closed_when_action_plan_exceeds_local_limits(tmp_
     broken = _action_plan(top_actions=["改动一", "改动二", "改动三", "改动四"])
     with pytest.raises(ProviderUnavailable):
         run_ai_analysis(mixed_result, provider=FakeProvider({**VALID, "action_plan": broken}), cache_dir=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Action Plan reduction pass (Step 1): fewer/less-repetitive/more-consistent
+# output using existing data only -- see core/ai.py::_prompt. These are
+# regression guards, not overfit to one specific demo wording: schema-level
+# tests confirm nothing here required *more* items than before, the new
+# quality validator is tested narrowly (bare phrase vs. a qualified trigger
+# using the same word), and prompt tests assert the guardrail concepts are
+# present without pinning exact phrasing.
+# ---------------------------------------------------------------------------
+
+def test_action_plan_security_actions_may_be_fewer_than_maximum():
+    """D: security_actions must not require more than one entry -- "less but
+    meaningful" is a valid plan, not just the historical 3-5 default."""
+    parsed = CommitteeResult.model_validate(VALID)
+    assert len(parsed.action_plan.security_actions) == 1
+
+
+def test_action_plan_timeline_accepts_single_observational_entry():
+    """G: a timeline horizon with nothing genuinely new to do may contain one
+    concise observational entry instead of a fabricated action."""
+    broken = _action_plan(timeline_3_months=["暂无新增操作，等待触发条件"])
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
+    assert parsed.action_plan.timeline_3_months == ["暂无新增操作，等待触发条件"]
+
+
+def test_action_plan_reassessment_trigger_accepts_state_based_condition():
+    """H: reassessment_triggers may be a state-based condition (concentration/
+    coverage/market-regime) rather than only a calendar-type event."""
+    broken = _action_plan(reassessment_triggers=[
+        {"event_or_condition": "若集中度持续高于建议区间且未见改善", "affected_holdings": ["NVDA"],
+         "reassess": "重新评估集中度管理是否需要加强"},
+    ])
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
+    assert parsed.action_plan.reassessment_triggers[0].event_or_condition == "若集中度持续高于建议区间且未见改善"
+
+
+@pytest.mark.parametrize("phrase", ["逢高", "明显反弹", "适度减仓", "分阶段优化"])
+def test_action_plan_rejects_bare_vague_trigger_phrase(mixed_result, phrase):
+    """F: a security_action trigger that is nothing but one of the specific
+    unqualified vague phrases called out in the reduction pass is rejected --
+    it gives the reader no observable condition to act on."""
+    from core.ai import _validate_action_plan_facts, _validate_action_plan_quality
+    from core.analytics import canonical_fact_packet
+
+    broken = _action_plan()
+    broken["security_actions"][0]["trigger"] = phrase
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
+    _validate_action_plan_facts(parsed.action_plan, canonical_fact_packet(mixed_result))
+    with pytest.raises(ValueError, match="vague phrase"):
+        _validate_action_plan_quality(parsed.action_plan)
+
+
+def test_action_plan_accepts_qualified_trigger_containing_vague_word():
+    """Companion to the above: the guardrail is narrow -- the same word used
+    as part of a concrete, anchored trigger must still pass."""
+    from core.ai import _validate_action_plan_quality
+
+    broken = _action_plan()
+    broken["security_actions"][0]["trigger"] = "若反弹至近期压力区，逢高分阶段减仓"
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
+    _validate_action_plan_quality(parsed.action_plan)  # must not raise
+
+
+def test_run_ai_analysis_fails_closed_on_bare_vague_trigger(tmp_path, mixed_result):
+    """Full path: a schema-valid, ticker-valid, within-limits response must
+    still fail closed when its only trigger is an unqualified vague phrase."""
+    broken = _action_plan()
+    broken["security_actions"][0]["trigger"] = "明显反弹"
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, provider=FakeProvider({**VALID, "action_plan": broken}), cache_dir=tmp_path)
+
+
+def test_prompt_includes_coverage_aware_lower_bound_guidance():
+    """A: the prompt must instruct the model to treat an incomplete
+    look-through true-exposure figure as a lower bound, not a complete fact,
+    tied to the actual coverage/uncovered-weight signals already in the
+    packet -- not just a generic "be careful" disclaimer."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())  # the source wraps long lines with literal newlines
+    assert "lookthrough_coverage" in text
+    assert "lookthrough_uncovered_weight" in text
+    assert "lower bound" in normalized.lower()
+    assert "≥" in text
+
+
+def test_prompt_does_not_treat_complete_coverage_as_exhaustive():
+    """Codex review P1 fix: `lookthrough_coverage == "complete"` only means
+    every held ETF has *some* published constituent data (ETF_HOLDINGS is a
+    Top-N snapshot, never exhaustive -- see core/reference.py and the ~59.5%
+    unnamed residual in VOO's own entry) -- it must never, by itself, permit
+    dropping the ">=" lower-bound qualifier for a look-through-derived
+    true-exposure figure. The only field-level condition that may drop the
+    qualifier is indirect == 0 (a purely direct holding, no ETF look-through
+    involved at all)."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert 'complete" and lookthrough_uncovered_weight is ~0 may you state' not in normalized
+    assert "indirect contribution is 0" in normalized
+    assert "never that 100% of that ETF's holdings are named" in normalized
+
+
+def test_prompt_includes_decision_confidence_guardrail():
+    """B: decision confidence must not exceed data confidence -- a major
+    action must not be justified primarily on an incomplete look-through
+    number, but direct-data-based risk management is still allowed."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "confidence" in text.lower()
+    assert "top_direct_holdings" in text
+    assert "risk_flags" in text
+
+
+def test_prompt_distinguishes_ai_target_from_deterministic_fact():
+    """C: any numeric target/range is the AI's own recommendation, never a
+    deterministically computed threshold -- must be phrased as such."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "建议目标" in text or "建议控制区间" in text
+    assert "recommendation" in text.lower()
+
+
+def test_prompt_includes_fund_destination_guardrail():
+    """Section 10: never claim an unverified destination reduces
+    concentration; prefer generic wording over naming an unverified ETF."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "转向经穿透验证后能够降低集中度的资产" in text
+
+
+def test_prompt_prefers_fewer_security_actions():
+    """Section 6: "less but meaningful" -- prefer 1-3 over padding to 5."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "1-3" in text
+    assert "其余核心仓位暂维持不变" in text
+
+
+def test_prompt_limits_tax_mention_repetition():
+    """Section 7: keep tax awareness, but cap repetition across sections."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "at most two places" in text
+
+
+def test_prompt_allows_observational_timeline_entries():
+    """Section 8: timeline buckets may hold a concise observational state
+    instead of a fabricated action when nothing new is genuinely due."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "观察" in text
+    assert "暂无新增操作" in text
+
+
+def test_prompt_allows_state_based_reassessment_triggers():
+    """Section 9: reassessment may be state-based, not only calendar events."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "state-based" in text.lower()
+
+
+def test_schema_bytes_unchanged_by_reduction_pass():
+    """Section 12: Step 1 is prompt/validation-only -- CommitteeResult's
+    provider-facing JSON Schema itself must not grow at all."""
+    schema = CommitteeResult.model_json_schema()
+    schema_bytes = len(json.dumps(schema, ensure_ascii=False).encode("utf-8"))
+    # Recorded from the pre-Step-1 baseline (commit 6217d51) for regression;
+    # see the Step 1 report for the exact before/after comparison.
+    assert schema_bytes == _BASELINE_SCHEMA_BYTES
+    assert len(schema.get("$defs", {})) == _BASELINE_SCHEMA_DEFS
 
 
 class _FakeGeminiModels:

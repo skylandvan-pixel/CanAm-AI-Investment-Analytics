@@ -215,5 +215,10 @@ def canonical_fact_packet(result: AnalyticsResult) -> dict:
         "concentration": {"top3": clean(result.top3_concentration), "top5": clean(result.top5_concentration),
                           "direct_effective_n": clean(result.direct_effective_n), "lookthrough_effective_n": clean(result.lookthrough_effective_n)},
         "risk_flags": [{"key": f.key, "title": f.title, "detail": f.detail} for f in result.risk_flags],
-        "data_quality": result.data_quality,
+        # lookthrough_coverage ("complete"/"partial"/"insufficient") is
+        # already computed by analyze() (see AnalyticsResult.lookthrough_
+        # coverage) but was not previously surfaced to the AI -- exposing it
+        # here lets the committee reason about coverage-aware wording (see
+        # core.ai._prompt) without recomputing or approximating anything.
+        "data_quality": {**result.data_quality, "lookthrough_coverage": result.lookthrough_coverage},
     }
