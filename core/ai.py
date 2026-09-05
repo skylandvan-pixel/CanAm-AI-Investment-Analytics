@@ -159,6 +159,22 @@ class SecurityAction(BaseModel):
     target: str = Field(min_length=1, max_length=100)
     trigger: str = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=1, max_length=200)
+    # Optional machine-readable counterpart to `target`, for REDUCE actions
+    # only. Free text like "反弹时分阶段减仓约15%-20%" cannot be parsed
+    # deterministically -- this single flat, optional field is Step 2A's
+    # only schema change, letting the local Trade Impact Preview (see
+    # core.trade_preview) convert an approved recommendation into actual
+    # whole shares client-side. Never required; still never a share count
+    # or price itself (see canonical_fact_packet).
+    #
+    # Deliberately no gt/lt here: those serialize to exclusiveMinimum/
+    # exclusiveMaximum in the JSON Schema sent to Gemini, which is outside
+    # the documented structured-output subset (this project has hit real
+    # Gemini 400 INVALID_ARGUMENT failures from unsupported schema keywords
+    # before -- see the runtime diagnostics work). The strict (0, 100) range
+    # is instead enforced locally, after parsing, in
+    # _validate_action_plan_quality.
+    position_reduction_pct: float | None = Field(default=None)
 
 
 class ReassessmentTrigger(BaseModel):
@@ -250,11 +266,20 @@ def _validate_action_plan_quality(plan: ActionPlan) -> None:
     reduction pass, step 1). A static JSON Schema/length check cannot express
     "is this trigger executable" -- this only catches the specific bare
     phrases the product review called out, so a concrete anchored trigger
-    that happens to use one of these words is never rejected."""
+    that happens to use one of these words is never rejected.
+
+    Also enforces the strict (0, 100) range on SecurityAction.
+    position_reduction_pct (Step 2A) locally, since that field deliberately
+    carries no gt/lt Pydantic constraint (see SecurityAction) to avoid
+    emitting exclusiveMinimum/exclusiveMaximum into the Gemini-facing
+    schema."""
     for action in plan.security_actions:
         trigger = action.trigger.strip()
         if trigger in _VAGUE_TRIGGER_PHRASES:
             raise ValueError(f"action plan trigger for {action.ticker} is an unqualified vague phrase: {trigger!r}")
+        pct = action.position_reduction_pct
+        if pct is not None and not (0 < pct < 100):
+            raise ValueError(f"action plan position_reduction_pct for {action.ticker} out of range (0, 100): {pct!r}")
 
 
 class TextProvider(Protocol):
@@ -474,7 +499,11 @@ condition; prefer "暂不追加"/"维持"/"反弹时分阶段减仓"/"回调后�
   not already implied by this packet. If the trigger is conditional on a market state that may never occur
   (e.g. "反弹后减仓"), also state a time-based reassessment backstop in trigger or reason (e.g. "若X个月内
   未出现该条件，应重新评估该持仓与集中度") -- this is a reassessment prompt, never an automatic forced trade
-  after a fixed period. reason is one concise explanation.
+  after a fixed period. reason is one concise explanation. position_reduction_pct: ONLY when action is
+  exactly "REDUCE" and target already states one specific relative reduction of the current share position
+  (never a portfolio-weight change, never a range), set this field to that same percentage as a plain
+  number (e.g. 10 for "减仓约10%"); leave it null for every other action, for a range/qualitative target, or
+  when the reduction is conditional on a trigger rather than a specific percentage right now.
 - timeline_now / timeline_30_days / timeline_3_months / timeline_6_12_months: at most 2-3 concise investor
   actions per horizon (never an internal data/system task), absorbing any longer-term structural migration
   (e.g. shifting toward more core-ETF weight, trimming a concentrated position over time) into the horizon

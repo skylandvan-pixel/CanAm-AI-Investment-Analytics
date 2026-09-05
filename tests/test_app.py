@@ -491,6 +491,50 @@ def test_action_plan_renders_all_sections_without_exception(monkeypatch):
     assert "关键决策日历" not in joined
 
 
+def test_trade_impact_preview_renders_for_reduce_action_with_reduction_pct(monkeypatch):
+    """Step 2A human-acceptance smoke test: a REDUCE security_action with
+    position_reduction_pct set renders the compact Trade Impact Preview
+    under the demo portfolio's real NVDA holding (55 shares @ $112 avg cost,
+    per core/demo.py) -- no exception, no tax-payable wording, no invented
+    destination security, proceeds explicitly held as cash."""
+    import json
+
+    import core.ai
+    from tests.test_ai import VALID
+
+    action_plan = json.loads(json.dumps(VALID["action_plan"]))
+    action_plan["security_actions"][0] = {
+        "ticker": "NVDA", "action": "REDUCE", "priority": "高",
+        "target": "建议目标：减少约10%当前仓位", "trigger": "若NVDA重新回到近期相对强势区间",
+        "reason": "直接权重偏高，具体交易影响见下方本地确定性预览。",
+        "position_reduction_pct": 10.0,
+    }
+    parsed = core.ai.CommitteeResult.model_validate({**VALID, "action_plan": action_plan})
+
+    def _fake_run_ai_analysis(result, **kwargs):
+        return parsed, {"provider": "gemini", "model": "gemini-3.6-flash", "cache_hit": False}
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _fake_run_ai_analysis)
+    app = _app()
+    app.session_state["ai_unlocked"] = True
+    nav = app.segmented_control(key="primary_nav")
+    nav.set_value("3 · AI 投资委员会").run(timeout=20)
+    btn = next(b for b in app.button if b.label == "启动 AI 投资委员会")
+    btn.click().run(timeout=20)
+    assert not app.exception
+
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "交易影响预览" in joined
+    assert "可执行约 5 股" in joined  # floor(55 * 10%) = 5
+    assert "预计已实现盈亏" in joined
+    assert "直接权重" in joined and "已识别穿透暴露" in joined and "Top-5 集中度" in joined
+    assert "现金" in joined  # cash-proceeds assumption stated
+    # Must never appear anywhere on the page: tax-payable claims, TLH, or an
+    # invented reinvestment destination security.
+    for forbidden in ("应缴税", "税款", "税负", "CRA", "损失收割", "买入 VOO", "买入VOO", "转为 VOO", "转为VOO"):
+        assert forbidden not in joined
+
+
 def test_runtime_version_logs_short_source_version(monkeypatch, caplog):
     """Diagnostic patch: with SOURCE_VERSION set (as Streamlit Cloud sets it
     to the deployed commit hash), the startup log must report only a short

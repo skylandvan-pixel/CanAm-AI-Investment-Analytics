@@ -51,8 +51,14 @@ VALID = {
 # CommitteeResult's serialized JSON Schema, as of the pre-Step-1 baseline
 # (commit 6217d51) -- the Action Plan reduction pass is prompt/validation
 # only and must not grow this at all (see test_schema_bytes_unchanged_by_
-# reduction_pass and the Step 1 report).
-_BASELINE_SCHEMA_BYTES = 3974
+# reduction_pass and the Step 1 report). Step 2A made one deliberate,
+# approved, flat, optional-field exception (SecurityAction.position_
+# reduction_pct, for the local Trade Impact Preview -- see core.trade_preview
+# and the Step 2A report) and rebaselined these two constants accordingly;
+# any *further* growth beyond that should again be treated as a real finding.
+# Rebaselined again after the Codex pre-commit fix that dropped gt/lt from
+# position_reduction_pct (see test_schema_bytes_match_step_2a_approved_baseline).
+_BASELINE_SCHEMA_BYTES = 4103
 _BASELINE_SCHEMA_DEFS = 4
 
 
@@ -557,6 +563,37 @@ def test_action_plan_accepts_qualified_trigger_containing_vague_word():
     _validate_action_plan_quality(parsed.action_plan)  # must not raise
 
 
+@pytest.mark.parametrize("pct", [0, -5, 100, 150])
+def test_position_reduction_pct_out_of_range_rejected_by_local_validation(pct):
+    """Codex P0 fix: since position_reduction_pct carries no Pydantic gt/lt
+    (to avoid exclusiveMinimum/exclusiveMaximum in the Gemini-facing
+    schema), the strict (0, 100) range must be enforced locally instead."""
+    from core.ai import _validate_action_plan_quality
+
+    broken = _action_plan()
+    broken["security_actions"][0]["position_reduction_pct"] = pct
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
+    with pytest.raises(ValueError, match="position_reduction_pct"):
+        _validate_action_plan_quality(parsed.action_plan)
+
+
+def test_position_reduction_pct_within_range_passes_local_validation():
+    from core.ai import _validate_action_plan_quality
+
+    broken = _action_plan()
+    broken["security_actions"][0]["position_reduction_pct"] = 10.0
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
+    _validate_action_plan_quality(parsed.action_plan)  # must not raise
+
+
+def test_payload_without_position_reduction_pct_field_still_validates():
+    """Backward compatibility: an old cached response (or any response that
+    simply omits the optional field) must continue to validate cleanly --
+    position_reduction_pct defaults to None."""
+    parsed = CommitteeResult.model_validate(VALID)  # VALID never sets this field
+    assert parsed.action_plan.security_actions[0].position_reduction_pct is None
+
+
 def test_run_ai_analysis_fails_closed_on_bare_vague_trigger(tmp_path, mixed_result):
     """Full path: a schema-valid, ticker-valid, within-limits response must
     still fail closed when its only trigger is an unqualified vague phrase."""
@@ -665,15 +702,33 @@ def test_prompt_allows_state_based_reassessment_triggers():
     assert "state-based" in text.lower()
 
 
-def test_schema_bytes_unchanged_by_reduction_pass():
-    """Section 12: Step 1 is prompt/validation-only -- CommitteeResult's
-    provider-facing JSON Schema itself must not grow at all."""
+def test_schema_bytes_match_step_2a_approved_baseline():
+    """CommitteeResult's provider-facing JSON Schema must not grow beyond the
+    one deliberate, approved Step 2A addition (position_reduction_pct: a
+    single flat optional float on SecurityAction, no new $defs) -- any
+    further growth should be treated as a new finding, not silently
+    rebaselined again."""
     schema = CommitteeResult.model_json_schema()
     schema_bytes = len(json.dumps(schema, ensure_ascii=False).encode("utf-8"))
-    # Recorded from the pre-Step-1 baseline (commit 6217d51) for regression;
-    # see the Step 1 report for the exact before/after comparison.
     assert schema_bytes == _BASELINE_SCHEMA_BYTES
     assert len(schema.get("$defs", {})) == _BASELINE_SCHEMA_DEFS
+    field_schema = schema["$defs"]["SecurityAction"]["properties"]["position_reduction_pct"]
+    assert field_schema is not None
+
+
+def test_position_reduction_pct_schema_has_no_exclusive_bound_keywords():
+    """Codex P0 fix: exclusiveMinimum/exclusiveMaximum are outside the
+    documented Gemini structured-output subset (this project has hit real
+    Gemini 400 INVALID_ARGUMENT failures from unsupported schema keywords
+    before). position_reduction_pct must carry no min/max constraint at the
+    schema level at all -- the strict (0, 100) range is enforced locally in
+    _validate_action_plan_quality instead, after parsing."""
+    schema = CommitteeResult.model_json_schema()
+    field_schema = json.dumps(schema["$defs"]["SecurityAction"]["properties"]["position_reduction_pct"])
+    assert "exclusiveMinimum" not in field_schema
+    assert "exclusiveMaximum" not in field_schema
+    assert "minimum" not in field_schema
+    assert "maximum" not in field_schema
 
 
 class _FakeGeminiModels:

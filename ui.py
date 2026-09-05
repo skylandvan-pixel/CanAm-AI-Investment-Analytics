@@ -8,6 +8,7 @@ from core.analytics import treemap_rows
 from core.models import AnalyticsResult
 from core.reference import ASSET_CLASS_LABELS_EN, ASSET_CLASS_LABELS_ZH
 from core.security_profile import resolve_security_profile
+from core.trade_preview import build_trade_impact_preview
 
 # Low-saturation, blue-first palette: dark muted navy through soft blue-gray.
 # No electric/royal/cobalt blue — hierarchy comes from value/lightness, not saturation.
@@ -282,7 +283,16 @@ ROLE_LABELS = {
 }
 
 
-def committee_view(ai_result) -> None:
+def committee_view(
+    ai_result, *, holdings=None, quotes=None, cash=None, account_currency=None,
+    usd_cad=None, account_type=None, before_result=None,
+) -> None:
+    """The trade_preview_context kwargs (all optional) are the same canonical
+    holdings/quotes/snapshot inputs already used for the real analysis --
+    passing them enables the Step 2A deterministic Trade Impact Preview
+    under each REDUCE-type security action; omitting any of them simply
+    disables that preview (e.g. in tests that don't need it), never changes
+    the rest of the committee rendering."""
     st.markdown('<div class="section-label">七人投资委员会（Investment Committee）</div>', unsafe_allow_html=True)
     for offset in range(0, len(ai_result.members), 2):
         cols = st.columns(2)
@@ -291,7 +301,11 @@ def committee_view(ai_result) -> None:
     st.markdown(f'<div class="quiet-card" style="margin-top:1rem"><b>多数意见（Majority View）</b><br>{ai_result.majority_view}<br><br><b>主要关切（Main Concern）</b><br>{ai_result.main_concern}</div>', unsafe_allow_html=True)
     st.markdown('<div class="section-label">主席决策（Chairman Decision）</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="quiet-card"><b>{ai_result.chairman_decision}</b></div>', unsafe_allow_html=True)
-    _render_action_plan(ai_result.action_plan)
+    _render_action_plan(
+        ai_result.action_plan, holdings=holdings, quotes=quotes, cash=cash,
+        account_currency=account_currency, usd_cad=usd_cad, account_type=account_type,
+        before_result=before_result,
+    )
 
 
 _PRIORITY_CSS = {"高": "ap-priority-high", "中高": "ap-priority-medhigh", "中": "ap-priority-med", "低": "ap-priority-low"}
@@ -306,7 +320,57 @@ _TIMELINE_LABELS = [
 ]
 
 
-def _render_action_plan(plan) -> None:
+def _format_pct(value: float | None) -> str:
+    return f"{value:.1%}" if value is not None else "—"
+
+
+def _trade_impact_preview_html(action, *, holdings, quotes, cash, account_currency, usd_cad, account_type, before_result) -> str:
+    """Returns a compact HTML snippet to nest inside the action's own
+    security card, or "" when no preview should be shown (missing context,
+    non-REDUCE action, or any Step 2A suppression rule -- see
+    core.trade_preview.build_trade_impact_preview)."""
+    if None in (holdings, quotes, cash, account_currency, account_type, before_result):
+        return ""
+    preview = build_trade_impact_preview(
+        holdings=holdings, quotes=quotes, cash=cash, account_currency=account_currency,
+        usd_cad=usd_cad, account_type=account_type, before_result=before_result,
+        ticker=action.ticker, action=action.action, position_reduction_pct=action.position_reduction_pct,
+    )
+    if preview is None:
+        return ""
+    # An identified-exposure figure only needs the Step 1 lower-bound "≥"
+    # framing when this ticker actually has an indirect (ETF-sourced)
+    # component -- a purely direct holding's true exposure is already exact.
+    has_indirect = (
+        preview.before_identified_exposure is not None
+        and preview.before_direct_weight is not None
+        and preview.before_identified_exposure > preview.before_direct_weight + 1e-9
+    )
+    exposure_prefix = "≥" if has_indirect else ""
+    gain_loss_line = (
+        f"约 {preview.trade_currency} {preview.estimated_realized_gain_loss:,.0f}（基于已保存的平均成本，估算值，非税务估算）"
+        if preview.gain_loss_available else "暂不可估算（平均成本币种未确认）"
+    )
+    return (
+        f'<div class="ap-security-meta" style="margin-top:.5rem;padding-top:.5rem;border-top:1px dashed #E2EAF4">'
+        f'<b>交易影响预览（Trade Impact Preview）</b><br>'
+        f'请求：当前仓位减少约 {preview.requested_position_reduction_pct:.0f}%'
+        f'（可执行约 {preview.executable_shares:.0f} 股，对应约 {preview.executable_position_reduction_pct:.1f}%）<br>'
+        f'预计交易金额：约 {preview.trade_currency} {preview.trade_value:,.0f}<br>'
+        f'预计已实现盈亏：{gain_loss_line}<br>'
+        f'直接权重：{_format_pct(preview.before_direct_weight)} → {_format_pct(preview.after_direct_weight)}　'
+        f'已识别穿透暴露：{exposure_prefix}{_format_pct(preview.before_identified_exposure)} → '
+        f'{exposure_prefix}{_format_pct(preview.after_identified_exposure)}　'
+        f'Top-5 集中度：{_format_pct(preview.before_top5_concentration)} → {_format_pct(preview.after_top5_concentration)}<br>'
+        f'<span style="font-size:.75rem;color:#8AA0B8">假设：卖出所得暂存为现金，不预设再投资标的；本预览为本地确定性估算，不构成税务建议。</span>'
+        f'</div>'
+    )
+
+
+def _render_action_plan(
+    plan, *, holdings=None, quotes=None, cash=None, account_currency=None,
+    usd_cad=None, account_type=None, before_result=None,
+) -> None:
     st.markdown('<div class="section-label">条件式行动方案（Action Plan）</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-label">当前行动结论（Current Action Summary）</div>', unsafe_allow_html=True)
@@ -333,12 +397,17 @@ def _render_action_plan(plan) -> None:
             f"<b>目标</b> {action.target}<br><b>触发条件</b> {action.trigger}<br><b>理由</b> {action.reason}"
         )
         priority_css = _PRIORITY_CSS.get(action.priority, "ap-priority-med")
+        trade_preview_html = _trade_impact_preview_html(
+            action, holdings=holdings, quotes=quotes, cash=cash, account_currency=account_currency,
+            usd_cad=usd_cad, account_type=account_type, before_result=before_result,
+        )
         st.markdown(
             f'<div class="ap-security-card">'
             f'<div class="ap-security-head"><span class="ap-security-ticker">{action.ticker}</span>'
             f'<span class="ap-priority {priority_css}">优先级 {action.priority}</span></div>'
             f'<div class="ap-security-action">{action_zh}</div>'
             f'<div class="ap-security-meta">{meta}</div>'
+            f'{trade_preview_html}'
             f'</div>', unsafe_allow_html=True,
         )
 

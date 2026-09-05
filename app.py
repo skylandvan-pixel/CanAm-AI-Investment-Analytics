@@ -263,7 +263,12 @@ else:
                 st.session_state.ai_result = None
                 st.session_state.ai_error = type(exc).__name__
         if st.session_state.ai_result:
-            committee_view(st.session_state.ai_result)
+            committee_view(
+                st.session_state.ai_result, holdings=holdings, quotes=st.session_state.quotes,
+                cash=st.session_state.cash, account_currency=st.session_state.account_currency,
+                usd_cad=st.session_state.usd_cad, account_type=st.session_state.account_type,
+                before_result=result,
+            )
         elif st.session_state.get("ai_error") or not (os.getenv("GEMINI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")):
             st.info("AI 分析当前不可用。")
     page_disclaimer()
