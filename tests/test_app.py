@@ -449,12 +449,13 @@ def test_ai_provider_failure_shows_only_generic_message_never_raw_exception(monk
 
 
 def test_action_plan_renders_all_sections_without_exception(monkeypatch):
-    """Human-acceptance smoke test for the upgraded Action Plan (Page 3):
-    a valid mocked committee result renders every new section -- Strategy
-    Now, Top Changes, Do Now/Do Not Now, Security Actions, Portfolio Target
-    Migration, Action Timeline (all 4 horizons), Execution Checklist, and
-    No Change -- with no exception, using only tickers that are real
-    holdings in the demo portfolio the app starts with."""
+    """Human-acceptance smoke test for the simplified five-section Action
+    Plan (Page 3): a valid mocked committee result renders every section --
+    Current Action Summary (strategy/top actions/do now/do not now), Key
+    Security Actions, Action Timeline (all 4 horizons), Key Events &
+    Reassessment Triggers, and the Execution Checklist -- with no exception,
+    using only tickers that are real holdings in the demo portfolio the app
+    starts with."""
     import core.ai
     from tests.test_ai import VALID
 
@@ -473,17 +474,21 @@ def test_action_plan_renders_all_sections_without_exception(monkeypatch):
     assert not app.exception
 
     joined = "\n".join(m.value for m in app.markdown)
+    assert "当前行动结论" in joined
     assert "当前总策略" in joined
     assert "本阶段最重要的几件事" in joined
     assert "现在做" in joined and "现在不做" in joined
-    assert "标的级行动" in joined
+    assert "重点持仓行动" in joined
     assert "NVDA" in joined
-    assert "组合目标迁移" in joined
     assert "行动时间线" in joined
     assert "未来30天" in joined and "未来3个月" in joined and "未来6–12个月" in joined
+    assert "关键事件与重新评估条件" in joined
     assert "执行清单" in joined
-    assert "维持不动的仓位" in joined
-    assert "SGOV" in joined
+    # The old standalone modules must be gone from the rendered page.
+    assert "组合目标迁移" not in joined
+    assert "维持不动的仓位" not in joined
+    assert "情景应对" not in joined
+    assert "关键决策日历" not in joined
 
 
 def test_apply_holdings_commits_exactly_the_frame_it_is_given():

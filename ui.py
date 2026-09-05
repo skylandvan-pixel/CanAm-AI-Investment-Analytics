@@ -295,23 +295,30 @@ def committee_view(ai_result) -> None:
 
 
 _PRIORITY_CSS = {"高": "ap-priority-high", "中高": "ap-priority-medhigh", "中": "ap-priority-med", "低": "ap-priority-low"}
+_ACTION_LABELS_ZH = {
+    "HOLD": "持有", "WAIT": "观望", "REDUCE": "减仓", "REDUCE_ON_REBOUND": "反弹后减仓",
+    "ADD_ON_PULLBACK": "回调后加仓", "STAGED_BUY": "分批买入", "STAGED_SELL": "分批卖出",
+    "CONTROL_ADDITIONS": "控制新增", "REVIEW_AFTER_EVENT": "事件后复核",
+}
 _TIMELINE_LABELS = [
-    ("now", "现在（Now）"), ("next_30_days", "未来30天（Next 30 Days）"),
-    ("next_3_months", "未来3个月（Next 3 Months）"), ("next_6_12_months", "未来6–12个月（6–12 Months）"),
+    ("timeline_now", "现在（Now）"), ("timeline_30_days", "未来30天（Next 30 Days）"),
+    ("timeline_3_months", "未来3个月（Next 3 Months）"), ("timeline_6_12_months", "未来6–12个月（6–12 Months）"),
 ]
 
 
 def _render_action_plan(plan) -> None:
     st.markdown('<div class="section-label">条件式行动方案（Action Plan）</div>', unsafe_allow_html=True)
 
-    st.markdown(f'<div class="quiet-card"><b>当前总策略（Strategy Now）</b><br>{plan.strategy_now}</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="section-label">本阶段最重要的几件事（Top Changes）</div>', unsafe_allow_html=True)
-    items = "".join(f"<li>{c}</li>" for c in plan.top_changes)
-    st.markdown(f'<div class="quiet-card"><ol style="margin:0;padding-left:1.2rem">{items}</ol></div>', unsafe_allow_html=True)
-
+    st.markdown('<div class="section-label">当前行动结论（Current Action Summary）</div>', unsafe_allow_html=True)
+    top_actions = "".join(f"<li>{c}</li>" for c in plan.top_actions)
     do_now = "".join(f"<li>{d}</li>" for d in plan.do_now)
     do_not = "".join(f"<li>{d}</li>" for d in plan.do_not_now)
+    st.markdown(
+        f'<div class="quiet-card"><b>当前总策略（Strategy Now）</b><br>{plan.strategy_now}'
+        f'<div style="margin-top:.7rem"><b>本阶段最重要的几件事（Top Actions）</b>'
+        f'<ol style="margin:.35rem 0 0;padding-left:1.2rem">{top_actions}</ol></div></div>',
+        unsafe_allow_html=True,
+    )
     st.markdown(
         f'<div class="ap-donow-grid">'
         f'<div class="quiet-card"><b>现在做（Do Now）</b><ul class="ap-list ap-do-now">{do_now}</ul></div>'
@@ -319,93 +326,43 @@ def _render_action_plan(plan) -> None:
         f'</div>', unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="section-label">标的级行动（Security Actions）</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">重点持仓行动（Key Security Actions）</div>', unsafe_allow_html=True)
     for action in plan.security_actions:
-        meta_lines = []
-        if action.target:
-            meta_lines.append(f"<b>目标</b> {action.target}")
-        if action.execution_style:
-            meta_lines.append(f"<b>执行方式</b> {action.execution_style}")
-        if action.trigger:
-            meta_lines.append(f"<b>触发条件</b> {action.trigger}")
-        if action.pause_condition:
-            meta_lines.append(f"<b>暂停条件</b> {action.pause_condition}")
-        if action.review_point:
-            meta_lines.append(f"<b>复核节点</b> {action.review_point}")
-        meta_lines.append(f"<b>理由</b> {action.reason}")
-        meta = "<br>".join(meta_lines)
+        action_zh = _ACTION_LABELS_ZH.get(action.action, action.action)
+        meta = (
+            f"<b>目标</b> {action.target}<br><b>触发条件</b> {action.trigger}<br><b>理由</b> {action.reason}"
+        )
         priority_css = _PRIORITY_CSS.get(action.priority, "ap-priority-med")
         st.markdown(
             f'<div class="ap-security-card">'
             f'<div class="ap-security-head"><span class="ap-security-ticker">{action.ticker}</span>'
             f'<span class="ap-priority {priority_css}">优先级 {action.priority}</span></div>'
-            f'<div class="ap-security-action">{action.action}</div>'
+            f'<div class="ap-security-action">{action_zh}</div>'
             f'<div class="ap-security-meta">{meta}</div>'
             f'</div>', unsafe_allow_html=True,
         )
 
-    st.markdown('<div class="section-label">组合目标迁移（Portfolio Target Migration）</div>', unsafe_allow_html=True)
-    ts = plan.target_structure
-    st.markdown(
-        f'<div class="quiet-card"><b>当前结构</b> {ts.current}<br>'
-        f'<b>3个月目标</b> {ts.next_3_months}<br><b>6–12个月目标</b> {ts.next_6_12_months}</div>',
-        unsafe_allow_html=True,
-    )
-    if plan.target_migration:
-        rows = "".join(
-            f'<div class="ap-calendar-row" style="grid-template-columns:3.6rem 1fr 1fr 1fr">'
-            f'<span class="ap-calendar-event">{row.ticker}</span>'
-            f'<span class="ap-calendar-reassess">3M {row.target_3_months or "—"}</span>'
-            f'<span class="ap-calendar-reassess">6–12M {row.target_6_12_months or "—"}</span>'
-            f'<span class="ap-calendar-reassess">{row.action}</span></div>'
-            for row in plan.target_migration
-        )
-        st.markdown(f'<div class="quiet-card" style="margin-top:.6rem">{rows}</div>', unsafe_allow_html=True)
-
     st.markdown('<div class="section-label">行动时间线（Action Timeline）</div>', unsafe_allow_html=True)
     horizon_cards = ""
     for key, label in _TIMELINE_LABELS:
-        horizon = getattr(plan.timeline, key)
-        actions_html = "".join(f"<li>{a}</li>" for a in horizon.actions)
-        watch = f'<div class="ap-timeline-trigger">关注 {" · ".join(horizon.watch_holdings)}</div>' if horizon.watch_holdings else ""
+        actions_html = "".join(f"<li>{a}</li>" for a in getattr(plan, key))
         horizon_cards += (
             f'<div class="ap-timeline-card"><div class="ap-timeline-title">{label}</div>'
-            f'<div class="ap-timeline-objective">{horizon.objective}</div>'
-            f'<ul class="ap-list">{actions_html}</ul>{watch}'
-            f'<div class="ap-timeline-trigger">复核触发：{horizon.review_trigger}</div></div>'
+            f'<ul class="ap-list">{actions_html}</ul></div>'
         )
     st.markdown(f'<div class="ap-timeline-grid">{horizon_cards}</div>', unsafe_allow_html=True)
 
-    if plan.scenarios:
-        st.markdown('<div class="section-label">情景应对（Scenario Response）</div>', unsafe_allow_html=True)
-        for scenario in plan.scenarios:
-            label = f'<br><small style="color:#8AA0B8">{scenario.weight_label}</small>' if scenario.weight_label else ""
-            pause = f'<br><b>暂停条件</b> {scenario.pause_condition}' if scenario.pause_condition else ""
-            affected = f'<br><b>相关标的</b> {" · ".join(scenario.affected_holdings)}' if scenario.affected_holdings else ""
-            st.markdown(
-                f'<div class="quiet-card" style="margin:.55rem 0"><b>{scenario.scenario}</b>{label}'
-                f'{affected}<br><b>行动</b> {scenario.action}{pause}</div>',
-                unsafe_allow_html=True,
-            )
-
-    if plan.decision_calendar:
-        st.markdown('<div class="section-label">关键决策日历（Decision Calendar）</div>', unsafe_allow_html=True)
-        rows = "".join(
-            f'<div class="ap-calendar-row">'
-            f'<span class="ap-calendar-date">{item.date or "日期待确认"}</span>'
-            f'<div><span class="ap-calendar-event">{item.event}</span>'
-            f'<div class="ap-calendar-reassess">{item.what_to_reassess}'
-            + (f' · 关注 {" · ".join(item.affected_holdings)}' if item.affected_holdings else "") + '</div></div>'
-            f'<span>重要性 {item.importance}</span></div>'
-            for item in plan.decision_calendar
-        )
-        st.markdown(f'<div class="quiet-card">{rows}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">关键事件与重新评估条件（Key Events &amp; Reassessment Triggers）</div>', unsafe_allow_html=True)
+    trigger_rows = "".join(
+        f'<div class="ap-calendar-row" style="grid-template-columns:1fr 1fr">'
+        f'<div><span class="ap-calendar-event">{trig.event_or_condition}</span>'
+        + (f'<div class="ap-calendar-reassess">关注 {" · ".join(trig.affected_holdings)}</div>' if trig.affected_holdings else "")
+        + '</div>'
+        f'<span class="ap-calendar-reassess">{trig.reassess}</span></div>'
+        for trig in plan.reassessment_triggers
+    )
+    st.markdown(f'<div class="quiet-card">{trigger_rows}</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-label">执行清单（Execution Checklist）</div>', unsafe_allow_html=True)
     checklist_items = "".join(f"<li>{c}</li>" for c in plan.checklist)
     st.markdown(f'<div class="quiet-card"><ul class="ap-checklist">{checklist_items}</ul></div>', unsafe_allow_html=True)
-
-    if plan.no_change:
-        st.markdown('<div class="section-label">维持不动的仓位（No Change）</div>', unsafe_allow_html=True)
-        no_change_items = "".join(f"<li>{c}</li>" for c in plan.no_change)
-        st.markdown(f'<div class="quiet-card"><ul class="ap-list">{no_change_items}</ul></div>', unsafe_allow_html=True)

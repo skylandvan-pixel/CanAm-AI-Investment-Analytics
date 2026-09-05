@@ -26,38 +26,24 @@ VALID = {
     "chairman_decision": "保持纪律，以条件触发方式调整。",
     "action_plan": {
         "strategy_now": "防守优先于进攻，控制单一集中度。",
-        "top_changes": ["控制NVDA集中度", "提高核心宽基比例"],
+        "top_actions": ["控制NVDA集中度", "提高核心宽基比例"],
         "do_now": ["复核NVDA仓位规模", "关注即将公布的财报"],
         "do_not_now": ["不要因单日波动一次性清仓", "不要为分散而分散新增低信念持仓"],
         "security_actions": [
             {
-                "ticker": "NVDA", "action": "反弹减仓", "priority": "高",
-                "reason": "单一标的集中度过高", "execution_style": "分2-3批",
-                "trigger": "风险指标持续恶化", "pause_condition": "财报前波动异常",
-                "review_point": "财报后一周", "target": "降至更合理区间",
+                "ticker": "NVDA", "action": "REDUCE_ON_REBOUND", "priority": "高",
+                "target": "反弹时分阶段减仓约15%-20%", "trigger": "若反弹至近期压力区",
+                "reason": "单一标的集中度过高",
             },
         ],
-        "target_structure": {
-            "current": "科技/成长集中度较高", "next_3_months": "降低单一个股风险",
-            "next_6_12_months": "核心宽基占比为主",
-        },
-        "target_migration": [
-            {"ticker": "NVDA", "target_3_months": "控制新增", "target_6_12_months": "待复核", "action": "反弹分批降低"},
+        "timeline_now": ["复核NVDA仓位"],
+        "timeline_30_days": ["关注NVDA财报"],
+        "timeline_3_months": ["分批降低NVDA权重"],
+        "timeline_6_12_months": ["提高VOO等核心宽基占比"],
+        "reassessment_triggers": [
+            {"event_or_condition": "NVDA 下一次财报后", "affected_holdings": ["NVDA"], "reassess": "重新评估集中度与 True Exposure"},
         ],
-        "timeline": {
-            "now": {"objective": "控制集中度风险", "actions": ["复核NVDA仓位"], "watch_holdings": ["NVDA"], "review_trigger": "财报公布后"},
-            "next_30_days": {"objective": "观察财报与风险指标", "actions": ["关注NVDA财报"], "watch_holdings": ["NVDA"], "review_trigger": "财报公布"},
-            "next_3_months": {"objective": "分批降低集中度", "actions": ["分批降低NVDA权重"], "watch_holdings": [], "review_trigger": "季度复核"},
-            "next_6_12_months": {"objective": "优化整体结构", "actions": ["提高VOO等核心宽基占比"], "watch_holdings": [], "review_trigger": "年度复核"},
-        },
-        "scenarios": [
-            {"scenario": "高位震荡 / 小幅回调", "weight_label": "主观情景权重", "affected_holdings": ["VOO"], "action": "回调分批增加核心宽基", "pause_condition": None},
-        ],
-        "decision_calendar": [
-            {"event": "NVDA 财报", "date": "日期待确认", "affected_holdings": ["NVDA"], "importance": "高", "what_to_reassess": "True Exposure 与集中度"},
-        ],
-        "checklist": ["复核NVDA仓位", "关注财报", "季度复核集中度", "年度复核结构", "检查应税账户成本基础"],
-        "no_change": ["SGOV 维持防守配置"],
+        "checklist": ["复核NVDA仓位", "关注财报", "季度复核集中度"],
     },
 }
 
@@ -247,14 +233,15 @@ def _action_plan(**overrides):
 
 
 def test_action_plan_valid_payload_parses(mixed_result):
-    """1: the full new Action Plan shape (all sections) validates cleanly
-    against the real fact packet for a portfolio that actually holds every
-    referenced ticker."""
-    from core.ai import _validate_action_plan_facts
+    """1: the full simplified five-section Action Plan shape validates
+    cleanly against the real fact packet for a portfolio that actually holds
+    every referenced ticker."""
+    from core.ai import _validate_action_plan_facts, _validate_action_plan_limits
     from core.analytics import canonical_fact_packet
 
     parsed = CommitteeResult.model_validate(VALID)
     _validate_action_plan_facts(parsed.action_plan, canonical_fact_packet(mixed_result))
+    _validate_action_plan_limits(parsed.action_plan)
     assert parsed.action_plan.strategy_now == VALID["action_plan"]["strategy_now"]
 
 
@@ -268,48 +255,126 @@ def test_legacy_flat_actions_schema_no_longer_accepted():
         CommitteeResult.model_validate(legacy)
 
 
-@pytest.mark.parametrize("field", ["strategy_now", "top_changes", "do_now", "do_not_now", "security_actions", "target_structure", "timeline", "checklist"])
+def test_legacy_eleven_section_schema_no_longer_accepted():
+    """Regression guard: the old 11-section Action Plan (top_changes,
+    target_structure, target_migration, scenarios, decision_calendar,
+    no_change, nested timeline) must not silently pass as valid any more --
+    the simplified five-section shape is required instead."""
+    legacy_plan = {
+        "strategy_now": "s", "top_changes": ["a"], "do_now": ["a", "b"], "do_not_now": ["a", "b"],
+        "security_actions": [{"ticker": "NVDA", "action": "持有", "priority": "高", "reason": "r"}],
+        "target_structure": {"current": "c", "next_3_months": "c", "next_6_12_months": "c"},
+        "timeline": {
+            "now": {"objective": "o", "actions": ["a"], "review_trigger": "t"},
+            "next_30_days": {"objective": "o", "actions": ["a"], "review_trigger": "t"},
+            "next_3_months": {"objective": "o", "actions": ["a"], "review_trigger": "t"},
+            "next_6_12_months": {"objective": "o", "actions": ["a"], "review_trigger": "t"},
+        },
+        "checklist": ["a", "b", "c", "d", "e"],
+    }
+    with pytest.raises(ValidationError):
+        CommitteeResult.model_validate({**VALID, "action_plan": legacy_plan})
+
+
+@pytest.mark.parametrize("field", [
+    "strategy_now", "top_actions", "do_now", "do_not_now", "security_actions",
+    "timeline_now", "timeline_30_days", "timeline_3_months", "timeline_6_12_months",
+    "reassessment_triggers", "checklist",
+])
 def test_action_plan_required_fields_are_enforced(field):
-    """2, 3, 4, 5, 6, 7: strategy_now, do_now, do_not_now, security_actions,
-    timeline and checklist are all required -- a response missing any one of
-    them must fail validation (fail closed), not silently render a blank
-    section."""
+    """Every one of the five sections' fields is required -- a response
+    missing any one of them must fail validation (fail closed), not
+    silently render a blank section."""
     broken = _action_plan()
     del broken[field]
     with pytest.raises(ValidationError):
         CommitteeResult.model_validate({**VALID, "action_plan": broken})
 
 
-def test_action_plan_do_now_requires_at_least_two_items():
-    broken = _action_plan(do_now=["只有一项"])
+@pytest.mark.parametrize("field", [
+    "strategy_now", "top_actions", "do_now", "do_not_now", "security_actions",
+    "timeline_now", "timeline_30_days", "timeline_3_months", "timeline_6_12_months",
+    "reassessment_triggers", "checklist",
+])
+def test_action_plan_all_five_sections_are_representable(field):
+    """1 (test-list): each of the five conceptual sections -- current action
+    summary (strategy_now/top_actions/do_now/do_not_now), key security
+    actions, action timeline (4 horizons), reassessment triggers, and the
+    execution checklist -- is representable in the schema and present on a
+    valid parsed plan."""
+    parsed = CommitteeResult.model_validate(VALID)
+    assert getattr(parsed.action_plan, field)
+
+
+def test_action_plan_empty_do_now_rejected():
+    """do_now must be non-empty -- a required field cannot be an empty list."""
+    broken = _action_plan(do_now=[])
     with pytest.raises(ValidationError):
         CommitteeResult.model_validate({**VALID, "action_plan": broken})
 
 
-def test_action_plan_checklist_length_is_bounded():
-    """7: checklist must have 5-8 items."""
-    too_few = _action_plan(checklist=["只有一项"])
-    with pytest.raises(ValidationError):
-        CommitteeResult.model_validate({**VALID, "action_plan": too_few})
-    too_many = _action_plan(checklist=[f"任务{i}" for i in range(9)])
-    with pytest.raises(ValidationError):
-        CommitteeResult.model_validate({**VALID, "action_plan": too_many})
+def test_action_plan_top_actions_capped_at_three_by_local_validation():
+    """2: top_actions cannot exceed 3 after local validation -- the schema
+    itself accepts more (kept flat/unbounded for the provider), but
+    _validate_action_plan_limits fails closed on the business rule."""
+    from core.ai import _validate_action_plan_limits
+
+    too_many = _action_plan(top_actions=["改动一", "改动二", "改动三", "改动四"])
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": too_many})
+    with pytest.raises(ValueError, match="top_actions"):
+        _validate_action_plan_limits(parsed.action_plan)
 
 
-def test_action_plan_top_changes_capped_at_three():
-    """Section G: at most 3 major structural changes."""
-    too_many = _action_plan(top_changes=["改动一", "改动二", "改动三", "改动四"])
-    with pytest.raises(ValidationError):
-        CommitteeResult.model_validate({**VALID, "action_plan": too_many})
+def test_action_plan_security_actions_capped_at_five_by_local_validation():
+    """3: security_actions cannot exceed 5 after local validation."""
+    from core.ai import _validate_action_plan_limits
+
+    base = VALID["action_plan"]["security_actions"][0]
+    too_many = _action_plan(security_actions=[{**base, "ticker": t} for t in ["NVDA", "VOO", "SGOV", "AAPL", "MSFT", "AMZN"]])
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": too_many})
+    with pytest.raises(ValueError, match="security_actions"):
+        _validate_action_plan_limits(parsed.action_plan)
 
 
-def test_action_plan_timeline_requires_all_four_horizons():
-    """6: now / next_30_days / next_3_months / next_6_12_months must all be
-    present -- not just a subset."""
-    broken = _action_plan()
-    del broken["timeline"]["next_6_12_months"]
-    with pytest.raises(ValidationError):
-        CommitteeResult.model_validate({**VALID, "action_plan": broken})
+def test_action_plan_reassessment_triggers_capped_at_three_by_local_validation():
+    """4: reassessment_triggers cannot exceed 3 after local validation."""
+    from core.ai import _validate_action_plan_limits
+
+    base = VALID["action_plan"]["reassessment_triggers"][0]
+    too_many = _action_plan(reassessment_triggers=[dict(base) for _ in range(4)])
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": too_many})
+    with pytest.raises(ValueError, match="reassessment_triggers"):
+        _validate_action_plan_limits(parsed.action_plan)
+
+
+def test_action_plan_checklist_capped_at_six_by_local_validation():
+    """5: checklist cannot exceed 6 after local validation."""
+    from core.ai import _validate_action_plan_limits
+
+    too_many = _action_plan(checklist=[f"任务{i}" for i in range(7)])
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": too_many})
+    with pytest.raises(ValueError, match="checklist"):
+        _validate_action_plan_limits(parsed.action_plan)
+
+
+@pytest.mark.parametrize("horizon", ["timeline_now", "timeline_30_days", "timeline_3_months", "timeline_6_12_months"])
+def test_action_plan_timeline_horizon_capped_at_three_by_local_validation(horizon):
+    """6: each timeline horizon cannot exceed 3 items after local
+    validation."""
+    from core.ai import _validate_action_plan_limits
+
+    too_many = _action_plan(**{horizon: ["a", "b", "c", "d"]})
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": too_many})
+    with pytest.raises(ValueError, match=horizon):
+        _validate_action_plan_limits(parsed.action_plan)
+
+
+def test_action_plan_within_limits_passes_local_validation():
+    """Sanity counterpart: a plan at or under every cap must not raise."""
+    from core.ai import _validate_action_plan_limits
+
+    parsed = CommitteeResult.model_validate(VALID)
+    _validate_action_plan_limits(parsed.action_plan)  # must not raise
 
 
 def test_action_plan_rejects_vague_action_label_outside_enum():
@@ -322,8 +387,8 @@ def test_action_plan_rejects_vague_action_label_outside_enum():
 
 
 def test_action_plan_unknown_ticker_in_security_actions_fails_closed(mixed_result):
-    """10, 11: a security action referencing a ticker that is not part of
-    this portfolio's canonical fact packet must fail closed, never render."""
+    """7: a security action referencing a ticker that is not part of this
+    portfolio's canonical fact packet must fail closed, never render."""
     from core.ai import _validate_action_plan_facts
     from core.analytics import canonical_fact_packet
 
@@ -334,75 +399,54 @@ def test_action_plan_unknown_ticker_in_security_actions_fails_closed(mixed_resul
         _validate_action_plan_facts(parsed.action_plan, canonical_fact_packet(mixed_result))
 
 
-def test_action_plan_unknown_ticker_in_target_migration_fails_closed(mixed_result):
+def test_action_plan_unknown_ticker_in_reassessment_trigger_fails_closed(mixed_result):
+    """8: an unverified ticker in a reassessment trigger's affected_holdings
+    must also fail closed."""
     from core.ai import _validate_action_plan_facts
     from core.analytics import canonical_fact_packet
 
     broken = _action_plan()
-    broken["target_migration"][0]["ticker"] = "TSLA"
+    broken["reassessment_triggers"][0]["affected_holdings"] = ["TSLA"]
     parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
     with pytest.raises(ValueError, match="unverified ticker"):
         _validate_action_plan_facts(parsed.action_plan, canonical_fact_packet(mixed_result))
 
 
-def test_action_plan_unknown_ticker_in_scenario_fails_closed(mixed_result):
-    from core.ai import _validate_action_plan_facts
-    from core.analytics import canonical_fact_packet
+def test_reassessment_trigger_has_no_date_field():
+    """9: no event date field is required -- ReassessmentTrigger's schema
+    exposes only event_or_condition/affected_holdings/reassess, and a
+    plan validates fine with a purely descriptive condition and no date of
+    any kind."""
+    schema = CommitteeResult.model_json_schema()
+    trigger_props = set(schema["$defs"]["ReassessmentTrigger"]["properties"])
+    assert trigger_props == {"event_or_condition", "affected_holdings", "reassess"}
+    assert "date" not in trigger_props
 
+    parsed = CommitteeResult.model_validate(VALID)
+    assert parsed.action_plan.reassessment_triggers[0].event_or_condition == "NVDA 下一次财报后"
+
+
+def test_reassessment_trigger_rejects_unexpected_date_field():
+    """Fail-closed companion to the above: extra="forbid" means even if the
+    model tried to smuggle a date field onto a trigger, it is rejected."""
     broken = _action_plan()
-    broken["scenarios"][0]["affected_holdings"] = ["TSLA"]
-    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
-    with pytest.raises(ValueError, match="unverified ticker"):
-        _validate_action_plan_facts(parsed.action_plan, canonical_fact_packet(mixed_result))
-
-
-def test_action_plan_missing_decision_calendar_date_does_not_fabricate_one(mixed_result):
-    """9: an omitted date must stay omitted (None), never be silently filled
-    in with an invented date."""
-    from core.ai import _validate_action_plan_facts
-    from core.analytics import canonical_fact_packet
-
-    plan = _action_plan()
-    plan["decision_calendar"][0]["date"] = None
-    parsed = CommitteeResult.model_validate({**VALID, "action_plan": plan})
-    _validate_action_plan_facts(parsed.action_plan, canonical_fact_packet(mixed_result))
-    assert parsed.action_plan.decision_calendar[0].date is None
-
-
-def test_action_plan_fabricated_calendar_date_fails_closed(mixed_result):
-    """8, CRITICAL RULE: any concrete calendar date the LLM might invent
-    must be rejected -- date may only be omitted or the fixed placeholder."""
-    from core.ai import _validate_action_plan_facts
-    from core.analytics import canonical_fact_packet
-
-    broken = _action_plan()
-    broken["decision_calendar"][0]["date"] = "2026-11-19"
-    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
-    with pytest.raises(ValueError, match="fabricated date"):
-        _validate_action_plan_facts(parsed.action_plan, canonical_fact_packet(mixed_result))
-
-
-def test_scenario_weight_label_cannot_claim_a_statistical_probability():
-    """H, CRITICAL: weight_label may only be omitted or one of the two fixed
-    disclaimer strings -- an attempt to state a numeric probability/percentage
-    is rejected at the schema level, before it could ever render as if it
-    were a modeled probability."""
-    broken = _action_plan()
-    broken["scenarios"][0]["weight_label"] = "60%"
+    broken["reassessment_triggers"][0]["date"] = "2026-11-19"
     with pytest.raises(ValidationError):
         CommitteeResult.model_validate({**VALID, "action_plan": broken})
 
 
-def test_scenario_weight_label_accepts_the_fixed_disclaimer_strings():
-    for label in ("主观情景权重", "策略情景，不代表统计概率", None):
-        plan = _action_plan()
-        plan["scenarios"][0]["weight_label"] = label
-        CommitteeResult.model_validate({**VALID, "action_plan": plan})  # must not raise
+def test_action_plan_schema_has_no_scenario_probability_field():
+    """10: no scenario probability field is required or accepted -- the old
+    scenarios/weight_label module is gone entirely, so the schema must not
+    expose any field name suggesting a statistical probability or weight."""
+    schema_text = json.dumps(CommitteeResult.model_json_schema(), ensure_ascii=False).lower()
+    for forbidden in ("probability", "weight_label", "scenario"):
+        assert forbidden not in schema_text
 
 
 def test_action_plan_schema_has_no_share_count_field():
-    """C: the app never sends per-share quantity/price to the AI provider
-    (see test_fact_packet_is_aggregated_not_raw_holdings in
+    """The app never sends per-share quantity/price to the AI provider (see
+    test_fact_packet_is_aggregated_not_raw_holdings in
     tests/test_analytics.py), so the Action Plan schema must not expose any
     field that could hold an invented share count."""
     schema_text = json.dumps(CommitteeResult.model_json_schema(), ensure_ascii=False).lower()
@@ -410,17 +454,17 @@ def test_action_plan_schema_has_no_share_count_field():
         assert forbidden not in schema_text
 
 
-def test_action_plan_target_migration_does_not_require_every_holding():
-    """9 (target migration): omitting target_migration entirely (empty list)
-    is valid -- it must never be forced for every holding."""
-    plan = _action_plan(target_migration=[])
-    CommitteeResult.model_validate({**VALID, "action_plan": plan})  # must not raise
-
-
-def test_action_plan_no_change_can_group_remaining_holdings():
-    plan = _action_plan(no_change=["SGOV/剩余持仓 — 维持，无需操作"])
-    parsed = CommitteeResult.model_validate({**VALID, "action_plan": plan})
-    assert parsed.action_plan.no_change == ["SGOV/剩余持仓 — 维持，无需操作"]
+def test_action_plan_old_standalone_modules_are_gone():
+    """Section 3: the old independent Top Changes / Target Migration /
+    Target Structure / Scenario Analysis / Decision Calendar / No Change
+    modules must no longer exist as separate schema fields."""
+    schema = CommitteeResult.model_json_schema()
+    action_plan_props = set(schema["$defs"]["ActionPlan"]["properties"])
+    for removed in (
+        "top_changes", "target_migration", "target_structure",
+        "scenarios", "decision_calendar", "no_change", "timeline",
+    ):
+        assert removed not in action_plan_props
 
 
 def test_run_ai_analysis_fails_closed_when_action_plan_references_unknown_ticker(tmp_path, mixed_result):
@@ -430,6 +474,14 @@ def test_run_ai_analysis_fails_closed_when_action_plan_references_unknown_ticker
     portfolio."""
     broken = _action_plan()
     broken["security_actions"][0]["ticker"] = "TSLA"
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, provider=FakeProvider({**VALID, "action_plan": broken}), cache_dir=tmp_path)
+
+
+def test_run_ai_analysis_fails_closed_when_action_plan_exceeds_local_limits(tmp_path, mixed_result):
+    """Full path: run_ai_analysis must also fail closed when a schema-valid
+    response violates a local business-rule cap (e.g. too many top_actions)."""
+    broken = _action_plan(top_actions=["改动一", "改动二", "改动三", "改动四"])
     with pytest.raises(ProviderUnavailable):
         run_ai_analysis(mixed_result, provider=FakeProvider({**VALID, "action_plan": broken}), cache_dir=tmp_path)
 
