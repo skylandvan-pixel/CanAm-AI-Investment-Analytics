@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 
 import pandas as pd
@@ -16,6 +17,17 @@ from core.models import ACCOUNT_TYPES, HoldingInput
 from ui import brand_header, committee_view, inject_theme, overview, page_disclaimer, risk_page
 
 load_dotenv()
+
+# Server-side only (Streamlit Cloud captures stderr in its Logs panel): lets a
+# production log line be tied back to the exact deployed commit. Streamlit
+# Cloud sets SOURCE_VERSION to the deployed commit hash; only a short prefix
+# is logged, never any secret. Module-level (runs on every script rerun, per
+# Streamlit's execution model) rather than session-state-gated, by design --
+# simplicity over exact once-only behavior.
+logging.getLogger("canam.app").info(
+    "CanAm runtime version: %s", os.getenv("SOURCE_VERSION", "unknown")[:12]
+)
+
 st.set_page_config(page_title="加美通 AI 投资分析", page_icon="◈", layout="wide", initial_sidebar_state="auto")
 inject_theme()
 

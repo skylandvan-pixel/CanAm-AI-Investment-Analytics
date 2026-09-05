@@ -491,6 +491,37 @@ def test_action_plan_renders_all_sections_without_exception(monkeypatch):
     assert "关键决策日历" not in joined
 
 
+def test_runtime_version_logs_short_source_version(monkeypatch, caplog):
+    """Diagnostic patch: with SOURCE_VERSION set (as Streamlit Cloud sets it
+    to the deployed commit hash), the startup log must report only a short
+    (12-char) prefix -- enough to confirm the deployed commit without
+    dumping the full env value."""
+    monkeypatch.setenv("SOURCE_VERSION", "59167ac46d4528ca50dfeccf550d33e3a9645a28")
+    with caplog.at_level("INFO", logger="canam.app"):
+        _app()
+    messages = [r.message for r in caplog.records if r.name == "canam.app"]
+    assert any(m == "CanAm runtime version: 59167ac46d45" for m in messages)
+
+
+def test_runtime_version_logs_unknown_when_source_version_absent(monkeypatch, caplog):
+    monkeypatch.delenv("SOURCE_VERSION", raising=False)
+    with caplog.at_level("INFO", logger="canam.app"):
+        _app()
+    messages = [r.message for r in caplog.records if r.name == "canam.app"]
+    assert any(m == "CanAm runtime version: unknown" for m in messages)
+
+
+def test_runtime_version_log_never_contains_secrets(monkeypatch, caplog):
+    monkeypatch.setenv("SOURCE_VERSION", "59167ac46d4528ca50dfeccf550d33e3a9645a28")
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSySECRETVALUESHOULDNEVERAPPEAR")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-SECRETVALUESHOULDNEVERAPPEAR")
+    with caplog.at_level("INFO", logger="canam.app"):
+        _app()
+    messages = [r.message for r in caplog.records if r.name == "canam.app"]
+    joined = "\n".join(messages)
+    assert "SECRETVALUESHOULDNEVERAPPEAR" not in joined
+
+
 def test_apply_holdings_commits_exactly_the_frame_it_is_given():
     """Guards 'editing imported quantity -> analyze uses edited quantity':
     the single Analyze button always calls _apply_holdings(edited), and
