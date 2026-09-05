@@ -1161,3 +1161,165 @@ def test_run_ai_analysis_with_gemini_provider_still_fails_closed_on_bad_json(mon
     assert len(caplog.records) == 1
     assert "stage=response_parse" in caplog.records[0].getMessage()
     assert "provider=gemini" in caplog.records[0].getMessage()
+
+
+# ---------------------------------------------------------------------------
+# Production Gemini diagnostic logging: sanitized request-shape/size metadata
+# on failure, to let a future production 400 be compared directly against a
+# known-good local reproduction. Diagnostic only -- no behavior change.
+# ---------------------------------------------------------------------------
+
+def test_400_failure_log_contains_model_length_and_whitespace_flag(monkeypatch, caplog, mixed_result, tmp_path):
+    """1, 2: a real 400 (ClientError) failure log includes the exact model
+    string's length and whether it carries leading/trailing whitespace."""
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    _no_sleep_calls(monkeypatch)
+    _install_flaky_gemini_client(monkeypatch, outcomes=[_client_error()])
+
+    from google.genai import errors
+    with pytest.raises(errors.ClientError):
+        run_ai_analysis(mixed_result, cache_dir=tmp_path)
+
+    message = caplog.records[0].getMessage()
+    assert "stage=generate_content" in message
+    assert f"model_length={len('gemini-3.6-flash')}" in message
+    assert "model_has_whitespace=False" in message
+
+
+def test_400_failure_log_contains_prompt_schema_packet_byte_lengths(monkeypatch, caplog, mixed_result, tmp_path):
+    """3, 4, 5: the failure log includes prompt/schema/fact-packet UTF-8
+    byte lengths -- never the content itself."""
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    _no_sleep_calls(monkeypatch)
+    _install_flaky_gemini_client(monkeypatch, outcomes=[_client_error()])
+
+    from google.genai import errors
+    with pytest.raises(errors.ClientError):
+        run_ai_analysis(mixed_result, cache_dir=tmp_path)
+
+    message = caplog.records[0].getMessage()
+    for field in ("prompt_bytes=", "schema_bytes=", "packet_bytes="):
+        assert field in message
+        value = message.split(field, 1)[1].split(" ", 1)[0]
+        assert int(value) > 0
+
+
+def test_400_failure_log_contains_api_key_presence_length_whitespace(monkeypatch, caplog, mixed_result, tmp_path):
+    """6: the failure log reports GEMINI_API_KEY presence/length/whitespace
+    -- metadata only, never the key value."""
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    _no_sleep_calls(monkeypatch)
+    _install_flaky_gemini_client(monkeypatch, outcomes=[_client_error()])
+
+    from google.genai import errors
+    with pytest.raises(errors.ClientError):
+        run_ai_analysis(mixed_result, cache_dir=tmp_path)
+
+    message = caplog.records[0].getMessage()
+    assert "gemini_key_present=True" in message
+    assert f"gemini_key_length={len('test-key-not-real')}" in message
+    assert "gemini_key_has_whitespace=False" in message
+
+
+def test_400_failure_log_never_contains_key_prompt_packet_or_holdings(monkeypatch, caplog, mixed_result, tmp_path):
+    """7, 8, 9, 10: no API key value, prompt text, fact-packet content, or
+    holding/ticker names ever appear in the failure log -- only the
+    sanitized size/presence metadata added above."""
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    real_key = "AIzaSyREALFAKEKEYVALUE1234567890"
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", real_key)
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    _no_sleep_calls(monkeypatch)
+    _install_flaky_gemini_client(monkeypatch, outcomes=[_client_error()])
+
+    from google.genai import errors
+    with pytest.raises(errors.ClientError):
+        run_ai_analysis(mixed_result, cache_dir=tmp_path)
+
+    message = caplog.records[0].getMessage()
+    assert real_key not in message
+    assert "NVDA" not in message and "VOO" not in message and "SGOV" not in message
+    assert "top_direct_holdings" not in message and "top_true_exposures" not in message
+    assert "portfolio_score" not in message
+    # The instructional prompt template text must not leak either.
+    assert "Seven-Member Investment Committee" not in message
+
+
+def test_400_still_does_not_retry_or_fallback_with_new_logging(monkeypatch, mixed_result, tmp_path):
+    """11, 12, 13: the new logging is purely additive -- a 400 still makes
+    exactly one call, no retry sleep, and no fallback attempt."""
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.delenv("GEMINI_FALLBACK_MODEL", raising=False)
+    sleeps = _no_sleep_calls(monkeypatch)
+    holder = _install_flaky_gemini_client(monkeypatch, outcomes=[_client_error()])
+
+    from google.genai import errors
+    with pytest.raises(errors.ClientError):
+        run_ai_analysis(mixed_result, cache_dir=tmp_path)
+
+    assert len(holder["client"].models.calls) == 1
+    assert sleeps == []
+
+
+def test_success_path_emits_no_diagnostic_failure_log_with_new_fields(caplog, mixed_result, tmp_path):
+    """14: a successful run still emits zero failure-log records -- the new
+    fields only ever appear on a failure path, never as a per-request
+    success log."""
+    caplog.set_level(logging.ERROR, logger="canam.ai")
+    run_ai_analysis(mixed_result, provider=FakeProvider(), cache_dir=tmp_path)
+    assert caplog.records == []
+
+
+def test_fallback_failure_log_includes_new_fields_and_marks_fallback_active(monkeypatch, mixed_result, tmp_path):
+    """Section 4/7: when the fallback model itself fails, the
+    stage=generate_content_fallback log (emitted from inside GeminiProvider)
+    also carries prompt/schema byte lengths, fallback_active=True, and an
+    attempt count -- without changing the existing fallback-failure behavior
+    (still exactly one extra call, still fails closed)."""
+    import logging as _logging
+    logger = _logging.getLogger("canam.ai")
+    records = []
+
+    class _Handler(_logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Handler()
+    logger.addHandler(handler)
+    logger.setLevel(_logging.WARNING)
+    try:
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+        monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
+        monkeypatch.delenv("GEMINI_FALLBACK_MODEL", raising=False)
+        _no_sleep_calls(monkeypatch)
+        _install_flaky_gemini_client(
+            monkeypatch, outcomes=[_server_error(), _server_error(), _server_error(), _server_error()],
+        )
+        from core.ai import GeminiProvider
+        from google.genai import errors
+
+        provider = GeminiProvider()
+        with pytest.raises(errors.ServerError):
+            provider.generate("prompt text", CommitteeResult.model_json_schema())
+    finally:
+        logger.removeHandler(handler)
+
+    fallback_failure = [r for r in records if "stage=generate_content_fallback" in r.getMessage()]
+    assert len(fallback_failure) == 1
+    message = fallback_failure[0].getMessage()
+    assert "fallback_active=True" in message
+    assert "attempt=4" in message  # 3 exhausted primary attempts + 1 fallback attempt
+    assert "prompt_bytes=" in message and "schema_bytes=" in message
+    assert "prompt text" not in message  # the actual prompt content must not leak

@@ -57,17 +57,38 @@ def _redact(text: str) -> str:
     return redacted
 
 
-def _log_ai_failure(exc: Exception, *, provider: str, model: str, stage: str) -> None:
+def _log_ai_failure(
+    exc: Exception, *, provider: str, model: str, stage: str,
+    prompt_bytes: int | None = None, schema_bytes: int | None = None,
+    packet_bytes: int | None = None, fallback_active: bool = False,
+    attempt: int | None = None,
+) -> None:
     """Server-side only diagnostic (Streamlit Cloud captures stderr in its
     Logs panel). Never raises, never re-formats exc for the caller -- the
     caller still re-raises the original exception unchanged, so this is
-    purely additive observability, not a behavior change."""
+    purely additive observability, not a behavior change.
+
+    The extra fields below exist to let a future production 400 be compared
+    directly against a known-good local reproduction (see the Gemini
+    structured-output compatibility investigation): the exact request
+    shape/size and whether the configured model/key strings carry invisible
+    whitespace, without ever logging the key, prompt, or fact-packet
+    content itself -- only byte counts and boolean/length metadata."""
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    http_status = getattr(exc, "code", None) or getattr(exc, "status", None)
     logger.error(
         "AI provider failure: provider=%s model=%s stage=%s exception=%s message=%s "
-        "ai_provider_env=%s gemini_model_env=%s gemini_key_present=%s anthropic_key_present=%s",
+        "ai_provider_env=%s gemini_model_env=%s gemini_key_present=%s anthropic_key_present=%s "
+        "model_repr=%r model_length=%d model_has_whitespace=%s "
+        "gemini_key_length=%s gemini_key_has_whitespace=%s http_status=%s "
+        "prompt_bytes=%s schema_bytes=%s packet_bytes=%s fallback_active=%s attempt=%s",
         provider, model, stage, type(exc).__name__, _redact(str(exc)),
         os.getenv("AI_PROVIDER", ""), os.getenv("GEMINI_MODEL", ""),
         bool(os.getenv("GEMINI_API_KEY")), bool(os.getenv("ANTHROPIC_API_KEY")),
+        model, len(model), model != model.strip(),
+        len(gemini_key) if gemini_key else None,
+        (gemini_key != gemini_key.strip()) if gemini_key else None,
+        http_status, prompt_bytes, schema_bytes, packet_bytes, fallback_active, attempt,
     )
 
 
@@ -314,6 +335,9 @@ class GeminiProvider:
                     _log_ai_failure(
                         fallback_exc, provider=self.name, model=self.fallback_model,
                         stage="generate_content_fallback",
+                        prompt_bytes=len(prompt.encode("utf-8")),
+                        schema_bytes=len(json.dumps(schema, ensure_ascii=False).encode("utf-8")),
+                        fallback_active=True, attempt=_GEMINI_MAX_ATTEMPTS + 1,
                     )
                     raise
         raise AssertionError("unreachable: loop always returns or raises")
@@ -432,17 +456,31 @@ def run_ai_analysis(
         except (OSError, KeyError, json.JSONDecodeError, ValidationError):
             pass
     packet = canonical_fact_packet(result)
+    prompt = _prompt(packet)
+    schema = CommitteeResult.model_json_schema()
+    # Byte lengths only (never the content itself) -- purely diagnostic, so a
+    # future production failure can be compared against a known-good local
+    # request of the same shape/size.
+    packet_bytes = len(json.dumps(packet, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+    prompt_bytes = len(prompt.encode("utf-8"))
+    schema_bytes = len(json.dumps(schema, ensure_ascii=False).encode("utf-8"))
     try:
-        raw = provider.generate(_prompt(packet), CommitteeResult.model_json_schema())
+        raw = provider.generate(prompt, schema)
     except Exception as exc:
-        _log_ai_failure(exc, provider=provider.name, model=provider.model, stage="generate_content")
+        _log_ai_failure(
+            exc, provider=provider.name, model=provider.model, stage="generate_content",
+            prompt_bytes=prompt_bytes, schema_bytes=schema_bytes, packet_bytes=packet_bytes,
+        )
         raise
     try:
         parsed = CommitteeResult.model_validate_json(raw)
         _validate_action_plan_facts(parsed.action_plan, packet)
         _validate_action_plan_limits(parsed.action_plan)
     except (ValidationError, ValueError) as exc:
-        _log_ai_failure(exc, provider=provider.name, model=provider.model, stage="response_parse")
+        _log_ai_failure(
+            exc, provider=provider.name, model=provider.model, stage="response_parse",
+            prompt_bytes=prompt_bytes, schema_bytes=schema_bytes, packet_bytes=packet_bytes,
+        )
         raise ProviderUnavailable("AI response failed schema validation") from exc
     meta = {
         "provider": provider.name, "model": provider.model, "fingerprint": fingerprint,
