@@ -58,7 +58,11 @@ VALID = {
 # any *further* growth beyond that should again be treated as a real finding.
 # Rebaselined again after the Codex pre-commit fix that dropped gt/lt from
 # position_reduction_pct (see test_schema_bytes_match_step_2a_approved_baseline).
-_BASELINE_SCHEMA_BYTES = 4103
+# Rebaselined a third time in Step 2A.3's P1-1 follow-up: ActionPlan.
+# security_actions dropped its minItems=1 constraint (a genuinely no-action
+# portfolio may now return an empty list -- see _validate_action_plan_quality
+# and the Step 2A.3 report) -- a 15-byte *decrease*, no new $defs.
+_BASELINE_SCHEMA_BYTES = 4088
 _BASELINE_SCHEMA_DEFS = 4
 
 
@@ -909,11 +913,11 @@ def test_prompt_allows_state_based_reassessment_triggers():
 
 
 def test_schema_bytes_match_step_2a_approved_baseline():
-    """CommitteeResult's provider-facing JSON Schema must not grow beyond the
-    one deliberate, approved Step 2A addition (position_reduction_pct: a
-    single flat optional float on SecurityAction, no new $defs) -- any
-    further growth should be treated as a new finding, not silently
-    rebaselined again."""
+    """CommitteeResult's provider-facing JSON Schema must match the current
+    approved baseline (see _BASELINE_SCHEMA_BYTES for the full rebaseline
+    history, most recently Step 2A.3's deliberate, approved removal of
+    security_actions' minItems=1) -- any further drift should be treated as
+    a new finding, not silently rebaselined again."""
     schema = CommitteeResult.model_json_schema()
     schema_bytes = len(json.dumps(schema, ensure_ascii=False).encode("utf-8"))
     assert schema_bytes == _BASELINE_SCHEMA_BYTES
@@ -1774,3 +1778,409 @@ def test_fallback_failure_log_includes_new_fields_and_marks_fallback_active(monk
     assert "attempt=4" in message  # 3 exhausted primary attempts + 1 fallback attempt
     assert "prompt_bytes=" in message and "schema_bytes=" in message
     assert "prompt text" not in message  # the actual prompt content must not leak
+
+
+# ============================================================================
+# Step 2A.3 -- Report Integrity Guardrails
+#
+# Four production regressions: (P0-1) absence of a triggered risk_flag was
+# reworded as "risk controlled"; (P0-2) direct_effective_n (direct-holdings
+# concentration only) was reworded as overall diversification; (P1-1) the
+# Action Plan padded HOLD/WAIT into high-priority slots and repeated
+# observational filler across every timeline horizon; (P1-2) a current fact
+# (cash weight) was echoed back as a recommended target with no independent
+# justification. See core.ai._validate_risk_confidence_language for the one
+# new fail-closed validator this step adds; everything else is prompt-only.
+# ============================================================================
+
+_MATERIAL_UNCERTAINTY_PACKET = {"data_quality": {"lookthrough_coverage": "insufficient", "lookthrough_uncovered_weight": 0.3494}}
+_COMPLETE_COVERAGE_PACKET = {"data_quality": {"lookthrough_coverage": "complete", "lookthrough_uncovered_weight": 0.0}}
+
+
+def _committee(**overrides):
+    payload = json.loads(json.dumps(VALID))
+    payload.update(overrides)
+    return payload
+
+
+# --- Unit tests: the narrow negation-aware phrase detector -----------------
+
+def test_unnegated_overconfident_phrase_flags_bare_claim():
+    """P0-1 production regression, verbatim: an unqualified "风险受控" claim
+    must be detected."""
+    from core.ai import _unnegated_overconfident_phrase
+
+    assert _unnegated_overconfident_phrase("鉴于目前组合风险受控且无紧急风险警报，维持现状。") == "风险受控"
+
+
+def test_unnegated_overconfident_phrase_ignores_negated_claim():
+    """Part 6 C: a sentence that DENIES the overconfident claim must never be
+    rejected merely for containing the same words -- "不能确认风险受控" is the
+    correct, required framing, not a violation."""
+    from core.ai import _unnegated_overconfident_phrase
+
+    assert _unnegated_overconfident_phrase("不能确认风险受控") is None
+    assert _unnegated_overconfident_phrase("当前已验证数据未触发新的确定性风险警报，但穿透覆盖有限，不能据此确认整体风险较低。") is None
+
+
+def test_unnegated_overconfident_phrase_detects_p02_direct_effective_n_variant():
+    """P0-2 production regression, verbatim: Direct Effective N was used to
+    claim the portfolio is "处于受控范围"."""
+    from core.ai import _unnegated_overconfident_phrase
+
+    assert _unnegated_overconfident_phrase("组合直接有效分散户数约为5.76，处于受控范围") == "处于受控范围"
+
+
+def test_unnegated_overconfident_phrase_none_for_clean_text():
+    from core.ai import _unnegated_overconfident_phrase
+
+    assert _unnegated_overconfident_phrase("直接持仓口径 Effective N 约为5.76，仅反映直接持仓分布。") is None
+
+
+# --- Unit tests: materiality threshold --------------------------------------
+
+def test_lookthrough_uncertainty_is_material_for_partial_and_insufficient_coverage():
+    from core.ai import _lookthrough_uncertainty_is_material
+
+    assert _lookthrough_uncertainty_is_material({"data_quality": {"lookthrough_coverage": "partial", "lookthrough_uncovered_weight": 0.01}})
+    assert _lookthrough_uncertainty_is_material({"data_quality": {"lookthrough_coverage": "insufficient", "lookthrough_uncovered_weight": 0.5}})
+
+
+def test_lookthrough_uncertainty_is_material_false_for_complete_coverage_and_low_uncovered_weight():
+    from core.ai import _lookthrough_uncertainty_is_material
+
+    assert not _lookthrough_uncertainty_is_material({"data_quality": {"lookthrough_coverage": "complete", "lookthrough_uncovered_weight": 0.0}})
+    assert not _lookthrough_uncertainty_is_material({"data_quality": {"lookthrough_coverage": "complete", "lookthrough_uncovered_weight": 0.02}})
+
+
+def test_lookthrough_uncertainty_is_material_true_above_uncovered_weight_threshold_even_if_labelled_complete():
+    """Same >0.05 threshold the prompt already asks the model to key its own
+    coverage-aware wording off of (see _prompt) -- the validator must agree."""
+    from core.ai import _lookthrough_uncertainty_is_material
+
+    assert _lookthrough_uncertainty_is_material({"data_quality": {"lookthrough_coverage": "complete", "lookthrough_uncovered_weight": 0.06}})
+
+
+# --- Unit tests: the fail-closed validator itself ---------------------------
+
+def test_validate_risk_confidence_language_fails_closed_on_majority_view():
+    from core.ai import _validate_risk_confidence_language
+
+    committee = CommitteeResult.model_validate(_committee(majority_view="鉴于目前组合风险受控且无紧急风险警报，维持现状。"))
+    with pytest.raises(ValueError, match="风险受控"):
+        _validate_risk_confidence_language(committee, _MATERIAL_UNCERTAINTY_PACKET)
+
+
+def test_validate_risk_confidence_language_scans_non_risk_specialists_too():
+    """P0-1: the guardrail is not risk-role-specific -- any specialist
+    (macro/portfolio/valuation_data/tax/action_rebalancing) making the same
+    overconfident claim must also fail closed."""
+    from core.ai import _validate_risk_confidence_language
+
+    payload = _committee()
+    for member in payload["members"]:
+        if member["role"] == "portfolio":
+            member["conclusion"] = "组合风险受控，无需调整。"
+    committee = CommitteeResult.model_validate(payload)
+    with pytest.raises(ValueError, match="members\\[portfolio\\]"):
+        _validate_risk_confidence_language(committee, _MATERIAL_UNCERTAINTY_PACKET)
+
+
+def test_validate_risk_confidence_language_allows_negated_phrasing():
+    """The confidence-qualified, allowed framing must pass unchanged."""
+    from core.ai import _validate_risk_confidence_language
+
+    committee = CommitteeResult.model_validate(
+        _committee(majority_view="当前已验证数据未触发新的确定性风险警报，但穿透覆盖有限，不能据此确认整体风险较低。")
+    )
+    _validate_risk_confidence_language(committee, _MATERIAL_UNCERTAINTY_PACKET)  # must not raise
+
+
+def test_validate_risk_confidence_language_skips_when_coverage_is_complete():
+    """The validator must never second-guess a well-covered portfolio's
+    legitimate reporting -- only fires when coverage is materially
+    incomplete."""
+    from core.ai import _validate_risk_confidence_language
+
+    committee = CommitteeResult.model_validate(_committee(majority_view="当前组合风险受控。"))
+    _validate_risk_confidence_language(committee, _COMPLETE_COVERAGE_PACKET)  # must not raise
+
+
+# --- Full-path integration tests via run_ai_analysis ------------------------
+
+def test_run_ai_analysis_fails_closed_on_overconfident_risk_claim_with_incomplete_coverage(tmp_path, low_confidence_result):
+    """Scenario 1 (Part 9): a portfolio with a materially incomplete
+    look-through ETF and zero deterministic risk_flags must still fail
+    closed if the AI phrases that absence of a flag as "risk controlled"."""
+    broken = _committee(majority_view="鉴于目前组合风险受控且无紧急风险警报，维持现状。")
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(low_confidence_result, provider=FakeProvider(broken), cache_dir=tmp_path)
+
+
+def test_run_ai_analysis_succeeds_with_confidence_qualified_language_under_incomplete_coverage(tmp_path, low_confidence_result):
+    """The required allowed framing -- detected risk vs. unverified risk --
+    must pass end-to-end against the same low-confidence portfolio."""
+    ok = _committee(majority_view="当前已验证数据未触发新的确定性风险警报，但穿透覆盖有限，不能据此确认整体风险较低。")
+    parsed, meta = run_ai_analysis(low_confidence_result, provider=FakeProvider(ok), cache_dir=tmp_path)
+    assert meta["success"]
+
+
+def test_run_ai_analysis_does_not_reject_overconfident_phrase_when_coverage_is_complete(tmp_path, mixed_result):
+    """Guardrail scope check: the same phrase that fails closed under
+    materially incomplete coverage must not be rejected against a portfolio
+    whose look-through coverage is already complete (mixed_result's VOO has
+    published constituent data) -- the validator is coverage-conditional, not
+    a blanket ban on the phrase."""
+    same_phrase = _committee(majority_view="当前组合风险受控。")
+    parsed, meta = run_ai_analysis(mixed_result, provider=FakeProvider(same_phrase), cache_dir=tmp_path)
+    assert meta["success"]
+
+
+# --- Prompt-regression tests: P0-1 risk-confidence wording ------------------
+
+def test_prompt_distinguishes_detected_risk_from_unverified_risk():
+    """B: the prompt must explicitly instruct the model that absence of a
+    triggered deterministic flag is not itself proof of safety."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "risk_flags" in text
+    assert "is NOT itself evidence" in normalized or "not itself evidence" in normalized.lower()
+    assert "当前已验证数据未触发新的确定性风险警报" in text
+
+
+def test_prompt_forbids_risk_controlled_phrases_under_material_uncertainty():
+    """A: the specific production-regression phrases must be named as
+    forbidden in the prompt when coverage is materially incomplete."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    for forbidden in ("风险受控", "整体风险完全受控", "没有风险", "整体风险较低", "处于受控范围"):
+        assert forbidden in text
+
+
+def test_prompt_risk_confidence_guardrail_applies_to_every_specialist_and_chairman():
+    """P0-1 + Part 5: the same wording rule must cover every committee
+    member, not only the risk role, and must bind majority_view/main_concern/
+    chairman_decision so the chairman cannot upgrade a specialist's stated
+    uncertainty into unqualified certainty."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "majority_view" in text and "main_concern" in text and "chairman_decision" in text
+    assert "not only the risk role" in normalized
+
+
+def test_prompt_preserves_deterministic_risk_level_unchanged():
+    """Explicit guard against the oversimplified fix this step forbids
+    (Part 1): coverage limitations must not force risk_level to Medium+."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "Do NOT change risk_level itself" in normalized or "risk_level itself" in normalized
+
+
+# --- Prompt-regression tests: P0-2 Direct Effective N scope -----------------
+
+def test_prompt_direct_effective_n_scoped_to_direct_holdings():
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "direct_effective_n" in text
+    assert "直接持仓口径" in text
+
+
+def test_prompt_forbids_direct_effective_n_overall_diversification_claims():
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    for forbidden in ("overall diversification", "true diversification", "factor diversification", "economic diversification", "sufficiently diversified"):
+        assert forbidden in normalized.lower()
+
+
+def test_prompt_keeps_direct_and_lookthrough_effective_n_semantically_distinct():
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "direct_effective_n" in text and "lookthrough_effective_n" in text
+    assert "never conflate" in normalized.lower()
+
+
+def test_prompt_forbids_factor_effective_n():
+    """Part 7 / Part 2: this patch must never introduce or suggest a
+    factor-adjusted or correlation-adjusted Effective N."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split()).lower()
+    assert "never compute, name, or imply any" in normalized
+    assert "factor-adjusted" in normalized or 'factor" ' in normalized
+
+
+# --- Prompt-regression tests: P1-1 Action Plan reduction --------------------
+
+def test_prompt_forbids_high_priority_hold_padding():
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "HOLD or WAIT must not occupy priority" in normalized
+
+
+def test_prompt_forbids_fabricated_actions_to_fill_slots():
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "Never fabricate a REDUCE, ADD, or other action merely to fill a slot" in normalized
+
+
+def test_prompt_discourages_repetitive_timeline_filler():
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "do not repeat the same generic" in normalized
+    assert "information density" in normalized.lower()
+
+
+# --- Prompt-regression tests: P1-2 current fact vs. recommended target ------
+
+def test_prompt_current_fact_is_not_automatically_a_target():
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "is a FACT about today's portfolio, never automatically" in normalized
+    assert "当前现金约0.38%" in text
+
+
+def test_prompt_cash_target_requires_independent_justification_and_ai_label():
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "建议保持在该比例左右" in text  # named as the forbidden unjustified restatement
+    assert '"建议"/"AI建议"' in text or "AI建议" in text
+
+
+# --- Structural / schema tests -----------------------------------------------
+
+def test_hold_action_may_use_low_priority_without_rejection():
+    """G: nothing in the schema or local validation forces HOLD/WAIT into a
+    high-priority slot -- a low-priority HOLD must parse and validate fine."""
+    plan = _action_plan()
+    plan["security_actions"][0].update({"action": "HOLD", "priority": "低", "position_reduction_pct": None})
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": plan})
+    assert parsed.action_plan.security_actions[0].priority == "低"
+
+
+# --- P1-1 follow-up: security_actions may now be an empty list -------------
+#
+# Phase 0 originally found ActionPlan.security_actions required min_length=1,
+# structurally forcing a fabricated HOLD/WAIT entry even when no holding
+# genuinely needed one. This follow-up drops that floor (see the
+# security_actions field in core.ai.ActionPlan) -- the field stays required
+# (the key itself must still be present), only its minimum cardinality is
+# relaxed from 1 to 0.
+
+def test_action_plan_with_empty_security_actions_parses_successfully():
+    """A: ActionPlan alone, with security_actions=[], must parse cleanly."""
+    from core.ai import ActionPlan
+
+    plan = ActionPlan.model_validate(_action_plan(security_actions=[]))
+    assert plan.security_actions == []
+
+
+def test_committee_result_with_empty_security_actions_validates_successfully():
+    """B: the full CommitteeResult (all six specialists + chairman fields)
+    must validate with an empty security_actions list."""
+    plan = _action_plan(security_actions=[])
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": plan})
+    assert parsed.action_plan.security_actions == []
+
+
+def test_run_ai_analysis_accepts_no_action_portfolio_with_empty_security_actions(tmp_path, low_confidence_result):
+    """C: the full run_ai_analysis path -- including _validate_action_plan_
+    facts/_limits/_quality/_risk_confidence_language -- must accept a
+    genuinely no-action response end-to-end, not just at the bare-model
+    level."""
+    plan = _action_plan(security_actions=[])
+    parsed, meta = run_ai_analysis(low_confidence_result, provider=FakeProvider({**VALID, "action_plan": plan}), cache_dir=tmp_path)
+    assert parsed.action_plan.security_actions == []
+    assert meta["success"]
+
+
+def test_action_plan_required_field_still_enforced_when_empty_list_allowed():
+    """The key itself must still be required -- only its minimum cardinality
+    was relaxed, not its presence. Mirrors test_action_plan_required_fields_
+    are_enforced for this one field specifically, post-change."""
+    broken = _action_plan()
+    del broken["security_actions"]
+    with pytest.raises(ValidationError):
+        CommitteeResult.model_validate({**VALID, "action_plan": broken})
+
+
+def test_action_plan_non_empty_security_actions_behavior_unchanged():
+    """F: existing non-empty security_actions behavior (parsing, ticker
+    fields, priority) is untouched by relaxing the cardinality floor."""
+    parsed = CommitteeResult.model_validate(VALID)
+    assert len(parsed.action_plan.security_actions) == 1
+    assert parsed.action_plan.security_actions[0].ticker == "NVDA"
+
+
+def test_old_cached_payload_with_one_security_action_still_valid_after_cardinality_relaxation():
+    """I: an old cached payload (from before this relaxation) always had
+    security_actions length >= 1 -- relaxing the floor from 1 to 0 can only
+    ever accept a strict superset of previously-valid payloads, so any old
+    cached payload must still validate identically."""
+    parsed = CommitteeResult.model_validate(VALID)
+    assert len(parsed.action_plan.security_actions) >= 1
+
+
+def test_no_factor_effective_n_field_added():
+    """Part 7 / Part 8 F: guard against a factor-adjusted Effective N being
+    smuggled into either the deterministic result model or the AI-facing
+    output schema."""
+    import dataclasses
+
+    from core.models import AnalyticsResult
+
+    field_names = {f.name for f in dataclasses.fields(AnalyticsResult)}
+    assert not any("factor" in name.lower() for name in field_names)
+    schema_text = json.dumps(CommitteeResult.model_json_schema(), ensure_ascii=False).lower()
+    assert "factor" not in schema_text
+
+
+def test_concentration_packet_keeps_direct_and_lookthrough_effective_n_as_distinct_keys(mixed_result):
+    """E: the two Effective N figures are computed independently and must
+    remain separate keys with (generally) different values -- mixed_result's
+    VOO look-through genuinely redistributes weight across many more
+    underlying names than its single direct holding."""
+    from core.analytics import canonical_fact_packet
+
+    packet = canonical_fact_packet(mixed_result)
+    assert "direct_effective_n" in packet["concentration"]
+    assert "lookthrough_effective_n" in packet["concentration"]
+    assert packet["concentration"]["direct_effective_n"] != packet["concentration"]["lookthrough_effective_n"]
+
+
+def test_schema_bytes_match_step_2a_3_approved_baseline():
+    """Step 2A.3's P0/P1 wording fixes are prompt/validation only (no schema
+    change); the P1-1 follow-up makes exactly one deliberate, approved
+    change -- dropping minItems=1 from security_actions (a 15-byte decrease,
+    no new $defs, see _BASELINE_SCHEMA_BYTES). Any *further* schema drift
+    beyond that should be treated as a new finding, not silently rebaselined
+    again."""
+    schema = CommitteeResult.model_json_schema()
+    schema_bytes = len(json.dumps(schema, ensure_ascii=False).encode("utf-8"))
+    assert schema_bytes == _BASELINE_SCHEMA_BYTES
+    assert len(schema.get("$defs", {})) == _BASELINE_SCHEMA_DEFS
+    security_actions_schema = schema["$defs"]["ActionPlan"]["properties"]["security_actions"]
+    assert "minItems" not in security_actions_schema
+    assert "security_actions" in schema["$defs"]["ActionPlan"]["required"]

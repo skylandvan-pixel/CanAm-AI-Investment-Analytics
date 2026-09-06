@@ -190,7 +190,13 @@ class ActionPlan(BaseModel):
     top_actions: list[str] = Field(min_length=1)
     do_now: list[str] = Field(min_length=1)
     do_not_now: list[str] = Field(min_length=1)
-    security_actions: list[SecurityAction] = Field(min_length=1)
+    # Step 2A.3 P1-1 follow-up: no min_length here (unlike the sibling list
+    # fields above/below) -- a genuinely no-action portfolio must be able to
+    # return an empty list rather than being structurally forced to fabricate
+    # a HOLD/WAIT security_action merely to satisfy schema cardinality. Still
+    # a required key (no default), so the provider must always return the
+    # field -- only its cardinality floor is relaxed, not its presence.
+    security_actions: list[SecurityAction]
     timeline_now: list[str] = Field(min_length=1)
     timeline_30_days: list[str] = Field(min_length=1)
     timeline_3_months: list[str] = Field(min_length=1)
@@ -306,6 +312,104 @@ def _validate_action_plan_quality(plan: ActionPlan) -> None:
             raise ValueError(
                 f"action plan position_reduction_pct for {action.ticker} is only valid for "
                 f"action in {sorted(_REDUCTION_PCT_REQUIRED_ACTIONS)!r}, got action={action.action!r}"
+            )
+
+
+# Exact/near-exact absolute-safety phrases the Step 2A.3 production review found
+# the AI using to turn "no detected deterministic risk flag" into "risk is
+# controlled" (P0-1), including the Direct-Effective-N variant of the same
+# mistake (P0-2, e.g. "...处于受控范围"). Deliberately a short, literal phrase
+# list rather than a broad NLP classifier -- see _unnegated_overconfident_phrase
+# for why a bare substring match on these alone would be unsafe.
+_OVERCONFIDENT_SAFETY_PHRASES = ("风险受控", "整体风险完全受控", "没有风险", "整体风险较低", "处于受控范围")
+
+# Negation/hedging markers that, immediately before a matched phrase, mean the
+# sentence is making the OPPOSITE (correct, required) claim -- e.g. "不能确认
+# 风险受控" must never be rejected merely for containing the substring "风险受控".
+_NEGATION_MARKERS = (
+    "不能", "无法", "并非", "不是", "未能", "很难", "不代表", "不可视为", "不应视为", "尚不能", "无从", "不足以",
+)
+_NEGATION_WINDOW_CHARS = 10
+
+
+def _unnegated_overconfident_phrase(text: str) -> str | None:
+    """Returns the first forbidden phrase in `text` that is NOT immediately
+    preceded (within _NEGATION_WINDOW_CHARS) by a negation/hedging marker, or
+    None if every occurrence is negated (or there are none). Narrow substring
+    logic, not general Chinese NLP -- see _OVERCONFIDENT_SAFETY_PHRASES."""
+    for phrase in _OVERCONFIDENT_SAFETY_PHRASES:
+        start = 0
+        while (idx := text.find(phrase, start)) != -1:
+            window = text[max(0, idx - _NEGATION_WINDOW_CHARS):idx]
+            if not any(marker in window for marker in _NEGATION_MARKERS):
+                return phrase
+            start = idx + 1
+    return None
+
+
+def _lookthrough_uncertainty_is_material(packet: dict) -> bool:
+    """True when the packet's own deterministic data_quality signals mean
+    look-through evidence is materially incomplete -- the same threshold
+    _prompt already asks the model to key its coverage-aware wording off of,
+    reused here so the validator and the prompt instruction agree on what
+    counts as "materially incomplete"."""
+    data_quality = packet.get("data_quality", {})
+    if data_quality.get("lookthrough_coverage") in ("partial", "insufficient"):
+        return True
+    uncovered = data_quality.get("lookthrough_uncovered_weight")
+    return uncovered is not None and uncovered > 0.05
+
+
+def _narrative_strings(committee: CommitteeResult) -> list[tuple[str, str]]:
+    """Every free-text field a specialist, the chairman, or the action plan
+    could phrase a risk/diversification conclusion in -- the surface
+    _validate_risk_confidence_language scans."""
+    plan = committee.action_plan
+    out: list[tuple[str, str]] = [(f"members[{m.role}].conclusion", m.conclusion) for m in committee.members]
+    out += [
+        ("majority_view", committee.majority_view),
+        ("main_concern", committee.main_concern),
+        ("chairman_decision", committee.chairman_decision),
+        ("action_plan.strategy_now", plan.strategy_now),
+    ]
+    for field in (
+        "top_actions", "do_now", "do_not_now", "checklist",
+        "timeline_now", "timeline_30_days", "timeline_3_months", "timeline_6_12_months",
+    ):
+        out += [(f"action_plan.{field}[{i}]", s) for i, s in enumerate(getattr(plan, field))]
+    for action in plan.security_actions:
+        out += [
+            (f"security_actions[{action.ticker}].target", action.target),
+            (f"security_actions[{action.ticker}].trigger", action.trigger),
+            (f"security_actions[{action.ticker}].reason", action.reason),
+        ]
+    for trigger in plan.reassessment_triggers:
+        out += [
+            ("reassessment_triggers.event_or_condition", trigger.event_or_condition),
+            ("reassessment_triggers.reassess", trigger.reassess),
+        ]
+    return out
+
+
+def _validate_risk_confidence_language(committee: CommitteeResult, packet: dict) -> None:
+    """Fail-closed guardrail for Step 2A.3 P0-1/P0-2: when the packet's own
+    look-through coverage is materially incomplete, "no detected deterministic
+    risk flag" must never be reported anywhere in the committee's output as
+    "risk is controlled" (or the Direct-Effective-N variant of the same
+    claim). Only fires when _lookthrough_uncertainty_is_material -- a
+    well-covered portfolio's legitimate reporting is never second-guessed
+    here, since the deterministic risk_flags already cover that case. A
+    negated use of the same words (e.g. "不能确认风险受控") is the correct,
+    required framing and is never rejected -- see
+    _unnegated_overconfident_phrase."""
+    if not _lookthrough_uncertainty_is_material(packet):
+        return
+    for label, text in _narrative_strings(committee):
+        phrase = _unnegated_overconfident_phrase(text)
+        if phrase:
+            raise ValueError(
+                f"{label} made an overconfident safety claim {phrase!r} despite materially incomplete "
+                "look-through coverage"
             )
 
 
@@ -458,6 +562,36 @@ Use only facts in the packet. Never recalculate or change a number, invent a pri
 or describe market regime as portfolio risk. Keep each specialist to one sentence. Return exactly the
 JSON schema. Use Chinese for conclusions and plans.
 
+Risk-confidence wording -- applies to every field below (every specialist conclusion, majority_view,
+main_concern, chairman_decision, and action_plan alike), not only the risk specialist: the ABSENCE of a
+triggered deterministic risk_flags entry is NOT itself evidence that the portfolio is safe or that risk is
+controlled -- it only means analyzed/verified data has not tripped a new flag. When data_quality.
+lookthrough_coverage is "partial"/"insufficient", or data_quality.lookthrough_uncovered_weight is materially
+above 0 (roughly >0.05), never phrase a favorable risk conclusion as "风险受控"/"整体风险完全受控"/
+"没有风险"/"整体风险较低"/"处于受控范围" or any equivalent unqualified safety claim -- those claim certainty
+the data does not support. Instead say plainly that no NEW deterministic flag was triggered while explicitly
+noting coverage/verification is incomplete and therefore does not confirm overall risk is low, e.g.
+"当前已验证数据未触发新的确定性风险警报，但穿透覆盖有限，不能据此确认整体风险较低。" This distinction --
+detected risk vs. unobserved/unverified risk -- must hold for every specialist, not only the risk role, and the
+chairman may never upgrade a specialist's stated uncertainty into unqualified certainty in majority_view,
+main_concern, or chairman_decision. Do NOT change risk_level itself to compensate -- it stays exactly the
+deterministic Layer 1 value already in the packet; only the interpretive wording around it carries this
+qualification when coverage is materially incomplete.
+
+Effective N scope -- concentration.direct_effective_n measures concentration across DIRECT portfolio holdings
+only (直接持仓口径的有效持仓数量) and must always be stated with that direct-holdings scope explicit
+(e.g. "直接持仓口径 Effective N 约为5.76"). By itself it must never be described or implied as overall diversification,
+true diversification, factor diversification, economic diversification, "risk controlled," or "sufficiently
+diversified" -- especially when look-through coverage is incomplete, since a stock and an ETF that also holds
+it (or several ETFs with overlapping constituents) can overlap economically in ways direct_effective_n cannot
+see. concentration.lookthrough_effective_n, when not null, measures look-through concentration instead and
+must stay semantically distinct from direct_effective_n -- never conflate the two or state one using the
+other's label. If lookthrough_coverage is "partial"/"insufficient" or lookthrough_effective_n is null, qualify
+any look-through Effective N statement the same way top_true_exposures figures are qualified below (a
+limited-coverage figure, never a complete diversification measure). Never compute, name, or imply any
+additional "factor-adjusted" or correlation-adjusted Effective N -- only the two Effective N figures already
+in the packet exist.
+
 Coverage-aware look-through wording -- applies to every field below, not only action_plan: each
 top_true_exposures entry is built only from named ETF constituents already known to this packet; any ETF
 weight with no published holdings data, or the unnamed remainder inside a covered ETF, is simply omitted
@@ -498,6 +632,17 @@ look-through effect cannot be verified from this packet, do not name a specific 
 never "核心宽基ETF（如VOO）"/"如SGOV" as a concentration-reducing destination) -- use general wording such as
 "转向经穿透验证后确认能够降低集中度的资产" instead of naming a broad ETF by ticker.
 
+Current-fact-vs-target rule: any current observed value already in this packet -- current cash weight, a
+current holding/ETF/sector/asset-class weight, etc. -- is a FACT about today's portfolio, never automatically
+a recommendation. State it plainly as a current fact (e.g. "当前现金约0.38%") without independently
+recommending that same level as a target. You may phrase a specific weight as a recommended target (e.g.
+"建议现金比例保持在X%左右", "建议目标权重X%-Y%") only when you give your own independent reasoning for why
+that level is appropriate given the packet's other facts (risk_flags, concentration, allocation) -- and even
+then, label it explicitly as your own recommendation ("建议"/"AI建议"), never as if the packet itself defined
+that target. Never restate a current percentage as "建议保持在该比例左右" merely because it happens to already
+be the current value with no additional justification -- this applies to cash specifically and to every other
+current weight in the packet.
+
 action_plan is a portfolio manager's execution memo, NOT another analysis report -- the committee members
 above already explain WHY; action_plan only answers WHAT to do, WHAT to avoid, WHICH holdings matter, WHEN to
 act, and WHAT would change the plan. A reader must be able to scan it in about 1-2 minutes, so stay concrete,
@@ -523,7 +668,18 @@ condition; prefer "暂不追加"/"维持"/"反弹时分阶段减仓"/"回调后�
   5-action maximum just to fill it. A holding that needs no real decision (already appropriately sized, no
   new information) does not need its own entry -- fold it into the checklist's closing
   "其余核心仓位暂维持不变" line instead. Only include a holding that genuinely needs REDUCE/ADD/staged
-  execution/explicit restraint/important review. ticker MUST be exactly one of the tickers already listed in
+  execution/explicit restraint/important review. If NO holding genuinely needs one of those, return
+  security_actions as an EMPTY list -- an empty list is valid and preferred over a manufactured entry. Never
+  fabricate a HOLD, WAIT, "maintain current weight," or "no rebalance necessary" entry merely to make this
+  section non-empty; those belong in the checklist's closing maintain-unchanged line instead, never as a
+  Key Security Action, unless the hold/wait decision itself is the materially important call this round (see
+  below). HOLD or WAIT must not occupy priority "高" merely because the position is large or because "no
+  rebalance is necessary" -- reserve "高" priority for HOLD/WAIT only when the decision to hold/wait itself is
+  the materially important call this round, with a concrete reason acting now would be wrong; a routine
+  no-change holding belongs in the checklist's closing line instead, not as a Key Security Action. Never
+  fabricate a REDUCE, ADD, or other action merely to fill a slot or make the plan look active -- if only one
+  holding genuinely warrants an entry, list only that one; if none do, list none. ticker MUST be exactly one
+  of the tickers already listed in
   top_direct_holdings or top_true_exposures above -- never invent a ticker or recommend a security outside
   this portfolio. action is one of the fixed labels in the schema (e.g. HOLD, WAIT, REDUCE,
   REDUCE_ON_REBOUND, ADD_ON_PULLBACK, STAGED_BUY, STAGED_SELL, CONTROL_ADDITIONS, REVIEW_AFTER_EVENT).
@@ -558,7 +714,10 @@ condition; prefer "暂不追加"/"维持"/"反弹时分阶段减仓"/"回调后�
   where it actually belongs instead of a separate table. A horizon with nothing genuinely new to do should
   contain one concise observational entry instead of a fabricated action -- e.g. "观察"/"暂无新增操作，等待
   触发条件"/"仅重新评估，无需新增操作" -- never restate an action already covered in an earlier horizon just
-  to fill space.
+  to fill space. If several horizons genuinely have nothing new, do not repeat the same generic
+  维持/观察/等待/复核 filler in all of them -- state the single governing wait condition once, in the earliest
+  horizon it applies, and keep later horizons minimal rather than restating it; the goal is information
+  density, not the appearance of activity.
 - reassessment_triggers: at most 3 portfolio-relevant conditions that would change this plan. Each may be
   either a known calendar-type event (e.g. next earnings, next FOMC) or a state-based condition already
   inferable from this packet (e.g. concentration or true-exposure remaining/worsening beyond the recommended
@@ -624,6 +783,7 @@ def run_ai_analysis(
         _validate_action_plan_facts(parsed.action_plan, packet)
         _validate_action_plan_limits(parsed.action_plan)
         _validate_action_plan_quality(parsed.action_plan)
+        _validate_risk_confidence_language(parsed, packet)
     except (ValidationError, ValueError) as exc:
         _log_ai_failure(
             exc, provider=provider.name, model=provider.model, stage="response_parse",

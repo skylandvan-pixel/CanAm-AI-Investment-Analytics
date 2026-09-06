@@ -491,6 +491,43 @@ def test_action_plan_renders_all_sections_without_exception(monkeypatch):
     assert "关键决策日历" not in joined
 
 
+def test_action_plan_with_empty_security_actions_renders_without_exception_and_hides_header(monkeypatch):
+    """Step 2A.3 P1-1 follow-up (D, E): a genuinely no-action portfolio may
+    now return security_actions=[] (see core.ai.ActionPlan). The page must
+    not crash, and must not show the "重点持仓行动（Key Security Actions）"
+    section label/heading with nothing under it -- every other section still
+    renders normally."""
+    import json
+
+    import core.ai
+    from tests.test_ai import VALID
+
+    action_plan = json.loads(json.dumps(VALID["action_plan"]))
+    action_plan["security_actions"] = []
+    parsed = core.ai.CommitteeResult.model_validate({**VALID, "action_plan": action_plan})
+
+    def _fake_run_ai_analysis(result, **kwargs):
+        return parsed, {"provider": "gemini", "model": "gemini-3.6-flash", "cache_hit": False}
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _fake_run_ai_analysis)
+    app = _app()
+    app.session_state["ai_unlocked"] = True
+    nav = app.segmented_control(key="primary_nav")
+    nav.set_value("3 · AI 投资委员会").run(timeout=20)
+    btn = next(b for b in app.button if b.label == "启动 AI 投资委员会")
+    btn.click().run(timeout=20)
+    assert not app.exception
+
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "重点持仓行动" not in joined
+    # Every other section still renders.
+    assert "当前行动结论" in joined
+    assert "当前总策略" in joined
+    assert "行动时间线" in joined
+    assert "关键事件与重新评估条件" in joined
+    assert "执行清单" in joined
+
+
 def test_trade_impact_preview_renders_for_reduce_action_with_reduction_pct(monkeypatch):
     """Step 2A human-acceptance smoke test: a REDUCE security_action with
     position_reduction_pct set renders the compact Trade Impact Preview

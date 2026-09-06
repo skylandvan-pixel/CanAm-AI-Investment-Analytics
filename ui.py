@@ -405,26 +405,27 @@ def _render_action_plan(
         f'</div>', unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="section-label">重点持仓行动（Key Security Actions）</div>', unsafe_allow_html=True)
-    for action in plan.security_actions:
-        action_zh = _ACTION_LABELS_ZH.get(action.action, action.action)
-        meta = (
-            f"<b>目标</b> {action.target}<br><b>触发条件</b> {action.trigger}<br><b>理由</b> {action.reason}"
-        )
-        priority_css = _PRIORITY_CSS.get(action.priority, "ap-priority-med")
-        trade_preview_html = _trade_impact_preview_html(
-            action, holdings=holdings, quotes=quotes, cash=cash, account_currency=account_currency,
-            usd_cad=usd_cad, account_type=account_type, before_result=before_result,
-        )
-        st.markdown(
-            f'<div class="ap-security-card">'
-            f'<div class="ap-security-head"><span class="ap-security-ticker">{action.ticker}</span>'
-            f'<span class="ap-priority {priority_css}">优先级 {action.priority}</span></div>'
-            f'<div class="ap-security-action">{action_zh}</div>'
-            f'<div class="ap-security-meta">{meta}</div>'
-            f'{trade_preview_html}'
-            f'</div>', unsafe_allow_html=True,
-        )
+    if plan.security_actions:
+        st.markdown('<div class="section-label">重点持仓行动（Key Security Actions）</div>', unsafe_allow_html=True)
+        for action in plan.security_actions:
+            action_zh = _ACTION_LABELS_ZH.get(action.action, action.action)
+            meta = (
+                f"<b>目标</b> {action.target}<br><b>触发条件</b> {action.trigger}<br><b>理由</b> {action.reason}"
+            )
+            priority_css = _PRIORITY_CSS.get(action.priority, "ap-priority-med")
+            trade_preview_html = _trade_impact_preview_html(
+                action, holdings=holdings, quotes=quotes, cash=cash, account_currency=account_currency,
+                usd_cad=usd_cad, account_type=account_type, before_result=before_result,
+            )
+            st.markdown(
+                f'<div class="ap-security-card">'
+                f'<div class="ap-security-head"><span class="ap-security-ticker">{action.ticker}</span>'
+                f'<span class="ap-priority {priority_css}">优先级 {action.priority}</span></div>'
+                f'<div class="ap-security-action">{action_zh}</div>'
+                f'<div class="ap-security-meta">{meta}</div>'
+                f'{trade_preview_html}'
+                f'</div>', unsafe_allow_html=True,
+            )
 
     st.markdown('<div class="section-label">行动时间线（Action Timeline）</div>', unsafe_allow_html=True)
     horizon_cards = ""
