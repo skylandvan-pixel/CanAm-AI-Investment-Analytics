@@ -2300,6 +2300,211 @@ def test_prompt_cash_target_requires_independent_justification_and_ai_label():
     assert '"建议"/"AI建议"' in text or "AI建议" in text
 
 
+# ============================================================================
+# Step 2A.4 -- Report Semantic Consistency
+#
+# A narrow prompt-only patch correcting four misleading terminology/inference
+# patterns the approved Codex read-only audit found: (A) lookthrough_covered_
+# weight/uncovered_weight described as constituent-level look-through
+# coverage rather than "portfolio weight in equity ETFs with/without some
+# reference holdings data"; (B) those two figures treated as complements
+# summing to 100%; (C) valuation_coverage (a priced-position COUNT ratio)
+# described as fundamental valuation-data coverage; (D) the Fixed Income
+# bucket (which includes cash-like Treasury ETFs like SGOV) collapsed into
+# plain "债券"; (E) current SGOV/Fixed-Income weight alone treated as proof
+# of an optimal target or "stability cornerstone". No Layer 1 formula,
+# packet field, or JSON schema changes -- see tests/test_analytics.py for the
+# formula-level pins and test_schema_bytes_match_step_2a_3_approved_baseline
+# above for the unchanged schema.
+# ============================================================================
+
+# --- A: coverage labels / prompt semantics ----------------------------------
+
+def test_prompt_covered_weight_not_described_as_exhaustive_coverage():
+    """A1: lookthrough_covered_weight must be framed as "portfolio weight in
+    equity ETFs with some reference data", never as identified/exhaustive
+    constituent coverage."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "lookthrough_covered_weight" in text
+    assert "有参考持仓数据的股票 ETF 占组合比例" in text
+    assert "neither is a constituent-identification coverage percentage" in normalized
+
+
+def test_prompt_uncovered_weight_described_as_no_reference_data():
+    """A2: lookthrough_uncovered_weight must be framed explicitly as equity
+    ETF portfolio weight with NO reference holdings data."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "lookthrough_uncovered_weight" in text
+    assert "暂无参考持仓数据的股票 ETF 占组合比例" in text
+
+
+def test_prompt_forbids_treating_covered_and_uncovered_as_complements():
+    """A3: 34.43%-style covered and 8.98%-style uncovered figures are
+    disjoint slices of the equity-ETF allocation, never complements of each
+    other or of 100% -- the prompt must explicitly forbid computing
+    "uncovered = 100% - covered_weight" or summing the two as total
+    coverage."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "NEVER complements of each other or of 100%" in normalized
+    assert '"uncovered = 100% - covered_weight"' in normalized
+    assert "disjoint slices of the equity-ETF allocation" in normalized
+
+
+def test_prompt_complete_coverage_cannot_imply_exhaustive_constituent_coverage():
+    """A4: lookthrough_coverage == "complete" must be framed as "every held
+    equity ETF has at least some reference data", never as full constituent
+    identification -- extends the existing Step 2A.2 guardrail with the
+    exact Step 2A.4 preferred Chinese phrasing."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "所有持有的股票 ETF 均有部分参考持仓数据" in text
+    assert "底层资产全部覆盖" in text  # named explicitly as forbidden
+    assert "已完全识别底层持仓" in text  # named explicitly as forbidden
+
+
+# --- B: lower-bound semantics (regression guard) ----------------------------
+
+def test_prompt_lower_bound_exposure_semantics_survive_step_2a_4():
+    """5: Step 2A.4's new coverage-semantic paragraphs must not weaken or
+    remove the pre-existing "≥" lower-bound requirement for ETF-derived
+    true-exposure figures (audit Finding D: NVDA ≥15.7%-style wording)."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "≥" in text
+    assert "lower bound" in normalized.lower()
+    assert "verified LOWER" in text or "verified lower" in normalized.lower()
+
+
+# --- C: market-value coverage ------------------------------------------------
+
+def test_prompt_valuation_coverage_uses_market_value_calculation_wording():
+    """8: the AI must call this figure 持仓市值计算覆盖率 (or clearly
+    equivalent wording), never a valuation-data coverage claim."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "valuation_coverage" in text
+    assert "持仓市值计算覆盖率" in text
+
+
+def test_prompt_forbids_fundamental_valuation_coverage_wording():
+    """9: the prompt must explicitly forbid describing valuation_coverage as
+    "估值数据覆盖率"/"估值覆盖率"/fundamental valuation-data coverage, and
+    must state plainly that it is a position-count pricing ratio, and that no
+    fundamental valuation metric (P/E, P/B, yield, ...) exists in the
+    packet."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "估值数据覆盖率" in text  # named explicitly as forbidden
+    assert "估值覆盖率" in text  # named explicitly as forbidden
+    assert "valuation data coverage" in normalized.lower()
+    assert "position-count" in normalized.lower()
+    assert "never invent one" in normalized.lower()
+
+
+# --- D: asset allocation -----------------------------------------------------
+
+def test_prompt_fixed_income_described_as_bonds_and_cash_like():
+    """11: the Fixed Income bucket must be presented to ordinary users as
+    债券与现金类 (Bonds & Cash-like), reflecting that it includes cash-like
+    Treasury ETFs (SGOV/CBIL), not a pure-bond category."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "债券与现金类" in text
+    assert "SGOV" in text and "CBIL" in text
+
+
+def test_prompt_forbids_collapsing_fixed_income_into_plain_bonds():
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    for forbidden in ("债券", "纯债券", "传统固定收益"):
+        assert forbidden in text  # named explicitly as forbidden standalone framing
+    assert '"股债"' in text or "股债" in text  # the forbidden stock/bond dichotomy framing
+
+
+def test_prompt_keeps_cash_and_other_separate_from_fixed_income():
+    """12: actual Cash/Other must be named as their own separate figure, not
+    folded into the Fixed Income ("Bonds & Cash-like") figure."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "never fold Cash into the Fixed Income figure" in normalized.lower() or "never fold cash into the fixed income figure" in normalized.lower()
+
+
+def test_prompt_forbids_forcing_allocation_percentages_to_sum_to_100():
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "never invent or reallocate a rounding residual" in normalized.lower()
+
+
+# --- E: current fact != target, SGOV-specific -------------------------------
+
+def test_prompt_sgov_current_weight_alone_cannot_justify_target_or_cornerstone():
+    """14: current SGOV/Fixed-Income weight alone must not justify "maintain
+    current target", "current allocation optimal", or "stability
+    cornerstone" -- the exact production-regression phrases must be named as
+    forbidden."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    for forbidden in (
+        "保持当前SGOV配置", "维持SGOV现有比例", "SGOV作为组合稳定基石",
+        "当前SGOV配置最优", "当前固收比例应保持不变",
+    ):
+        assert forbidden in text
+    normalized = " ".join(text.split())
+    assert "CURRENT WEIGHT ALONE IS NOT SUFFICIENT EVIDENCE" in normalized
+
+
+def test_prompt_allows_independently_reasoned_sgov_hold():
+    """15: the SGOV/Fixed-Income guardrail must not ban HOLD/CONTROL_
+    ADDITIONS/WAIT outright -- those remain legitimate when reasoned from
+    packet-visible facts and labeled as the AI's own recommendation."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "does NOT ban HOLD, CONTROL_ADDITIONS, or WAIT" in normalized
+    assert "legitimate whenever reasoned from packet-visible facts" in normalized
+
+
+def test_prompt_forbids_manufactured_sgov_hold_card():
+    """Part 6: the Action Plan must not manufacture an SGOV/Fixed-Income HOLD
+    card merely because the holding exists -- ties the Step 2A.3 no-filler
+    rule to the Step 2A.4 SGOV example explicitly."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "never manufacture an SGOV or other Fixed-Income HOLD" in text
+
+
+def test_security_actions_may_still_be_empty_after_step_2a_4():
+    """16: Step 2A.3's empty-security_actions cardinality relaxation is
+    untouched by this prompt-only patch."""
+    plan = _action_plan(security_actions=[])
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": plan})
+    assert parsed.action_plan.security_actions == []
+
+
 # --- Structural / schema tests -----------------------------------------------
 
 def test_hold_action_may_use_low_priority_without_rejection():

@@ -64,6 +64,68 @@ def test_sgov_is_fixed_income_and_not_uncovered(mixed_result):
     assert "SGOV" not in mixed_result.uncovered_etfs
 
 
+# ---------------------------------------------------------------------------
+# Step 2A.4 -- Report Semantic Consistency: these tests pin the exact
+# deterministic formulas behind data_quality.{lookthrough_covered_weight,
+# lookthrough_uncovered_weight, lookthrough_coverage, valuation_coverage} so
+# that this patch's prompt-only semantic clarification (see core.ai._prompt)
+# can never be mistaken for -- or silently accompanied by -- a Layer 1
+# calculation change. No formula below is new; every assertion already holds
+# on the pre-2A.4 codebase.
+# ---------------------------------------------------------------------------
+
+def test_data_quality_formulas_are_pinned(mixed_result):
+    """mixed_result = NVDA(20)/VOO(50)/SGOV(30) @ $100, no cash. VOO is the
+    only ETF held and it has an ETF_HOLDINGS entry, so covered_weight is
+    exactly VOO's direct weight, uncovered_weight is exactly zero, and
+    coverage is "complete" -- SGOV is Fixed Income, not an equity ETF, so it
+    never enters either figure. All 3 positions priced -> valuation_coverage
+    (a position-COUNT ratio) is exactly 1.0."""
+    packet = canonical_fact_packet(mixed_result)
+    dq = packet["data_quality"]
+    assert dq["valuation_coverage"] == pytest.approx(1.0)
+    assert dq["lookthrough_covered_weight"] == pytest.approx(.5)  # VOO's direct weight only
+    assert dq["lookthrough_uncovered_weight"] == pytest.approx(0.0)
+    assert dq["lookthrough_coverage"] == "complete"
+
+
+def test_covered_and_uncovered_weight_are_disjoint_not_complements(quote_factory):
+    """Audit Finding B: lookthrough_covered_weight and
+    lookthrough_uncovered_weight are disjoint slices of the equity-ETF
+    allocation only -- never complements of each other or of 100%. Here
+    covered=20% (VOO, has ETF_HOLDINGS data) + uncovered=30% (XLF, an equity
+    ETF with NO ETF_HOLDINGS entry) = 50%, leaving the other 50% of the
+    portfolio (10% NVDA stock + 40% CBIL Fixed Income) outside both figures
+    entirely -- "uncovered = 100% - covered" would wrongly claim 80%."""
+    result = analyze(build_snapshot(
+        [HoldingInput("NVDA", 10), HoldingInput("VOO", 20), HoldingInput("XLF", 30), HoldingInput("CBIL", 40)],
+        quote_factory("NVDA", "VOO", "XLF", "CBIL"),
+    ))
+    packet = canonical_fact_packet(result)
+    dq = packet["data_quality"]
+    assert dq["lookthrough_covered_weight"] == pytest.approx(.20)
+    assert dq["lookthrough_uncovered_weight"] == pytest.approx(.30)
+    recognized_equity_etf_weight = dq["lookthrough_covered_weight"] + dq["lookthrough_uncovered_weight"]
+    assert recognized_equity_etf_weight == pytest.approx(.50)
+    assert recognized_equity_etf_weight != pytest.approx(1.0)  # not complements of 100%
+    assert (1.0 - dq["lookthrough_covered_weight"]) != pytest.approx(dq["lookthrough_uncovered_weight"])
+
+
+def test_valuation_coverage_is_a_position_count_ratio_not_a_valuation_metric(quote_factory):
+    """Audit Finding E: valuation_coverage is literally (# positions with a
+    usable market value) / (# entered positions) -- a pricing/position-count
+    ratio, unrelated in formula to any position's dollar size or to any
+    fundamental valuation metric (P/E, P/B, yield, ...), none of which exist
+    in this packet."""
+    quotes = quote_factory("AAPL")
+    quotes["MISSING"] = Quote("MISSING", None, None, status="error:test")
+    snapshot = build_snapshot([HoldingInput("AAPL", 1), HoldingInput("MISSING", 50)], quotes)
+    result = analyze(snapshot)
+    packet = canonical_fact_packet(result)
+    assert snapshot.coverage_ratio == pytest.approx(.5)  # 1 of 2 positions priced
+    assert packet["data_quality"]["valuation_coverage"] == pytest.approx(.5)
+
+
 def test_effective_n_semantics_are_distinct(mixed_result):
     assert mixed_result.direct_effective_n is not None
     assert mixed_result.lookthrough_effective_n is not None

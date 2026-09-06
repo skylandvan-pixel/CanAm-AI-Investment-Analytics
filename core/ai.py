@@ -668,6 +668,39 @@ coverage -- those claim every underlying holding is identified, which "complete"
 plain, user-friendly wording that states the actual identified/verified weight, e.g. "已获得穿透数据，当前
 可验证底层权重覆盖约38.39%", not internal jargon like "coverage=complete".
 
+Reference-holdings-weight semantics (Step 2A.4): data_quality.lookthrough_covered_weight and
+lookthrough_uncovered_weight each describe a share of the PORTFOLIO invested in equity ETFs -- neither is a
+constituent-identification coverage percentage, and neither describes how much of any individual ETF's own
+holdings are named (that per-ETF caveat is covered above). lookthrough_covered_weight is the portfolio weight
+held in equity ETFs for which this packet has SOME reference holdings data at all -- phrase it as, e.g.,
+"有参考持仓数据的股票 ETF 占组合比例约34.43%", never as identified/exhaustive constituent coverage.
+lookthrough_uncovered_weight is the portfolio weight held in equity ETFs for which this packet has NO
+reference holdings data at all -- phrase it as, e.g., "暂无参考持仓数据的股票 ETF 占组合比例约8.98%". These two
+figures are NEVER complements of each other or of 100%: they are disjoint slices of the equity-ETF allocation
+only (direct stocks, cash, and Fixed Income holdings sit outside both) -- never compute, state, or imply
+"uncovered = 100% - covered_weight", and never add the two together and present the sum as total constituent
+coverage. When lookthrough_coverage is "complete", the correct semantic interpretation is
+"所有持有的股票 ETF 均有部分参考持仓数据" (every held equity ETF has at least some reference holdings data) --
+never "底层资产全部覆盖"/"已完全识别底层持仓"/any wording implying every constituent is identified.
+
+Market-value-coverage semantics (Step 2A.4): data_quality.valuation_coverage is the number of entered
+positions with a usable, verified market value divided by the total number of entered positions -- a
+position-count pricing-coverage ratio, computed the same way regardless of position size. It is NEVER a
+Forward P/E, valuation-multiple, fundamental-valuation, dividend-yield, or earnings-data coverage measure, and
+no such valuation metric exists anywhere in this packet -- never invent one. Never phrase this figure as
+"估值数据覆盖率"/"估值覆盖率"/"valuation data coverage" or any wording implying fundamental valuation
+coverage. Prefer "持仓市值计算覆盖率" -- e.g. "持仓市值计算覆盖率100%（按持仓数量）" for a value of 1.0.
+
+Asset-allocation wording (Step 2A.4): asset_allocation's keys ("Equity"/"Fixed Income"/"Cash"/"Other") are
+Layer 1 portfolio-weight buckets, not a stock/bond dichotomy -- the "Fixed Income" bucket includes cash-like
+short-duration Treasury ETFs (e.g. SGOV/CBIL), not only traditional longer-duration bonds. Never collapse it
+into "债券"/"纯债券"/"传统固定收益", and never describe the portfolio with a simple "股债" (stock/bond) framing
+-- use "债券与现金类" (Bonds & Cash-like) for the Fixed Income bucket instead, e.g. "股票约70.3%，债券与现金类
+资产约28.7%". If asset_allocation also has a non-trivial Cash and/or Other weight worth mentioning, name it as
+its own separate figure using only the packet's own values (e.g. "另有约1%现金/其他资产") -- never fold Cash
+into the Fixed Income figure, and never invent or reallocate a rounding residual just to force the cited
+percentages to sum to exactly 100.
+
 Tax-lot rule: this system has no tax-lot/share-batch history and no cost-basis-currency guarantee (see
 data_quality and the local Trade Impact Preview). Never claim or recommend which lot/batch of shares to
 sell, a "high-cost lot," a "low-gain lot," tax-lot sequencing, or specific-identification strategy (e.g.
@@ -700,6 +733,17 @@ that target. Never restate a current percentage as "建议保持在该比例左�
 be the current value with no additional justification -- this applies to cash specifically and to every other
 current weight in the packet.
 
+SGOV / Fixed-Income application of the rule above (Step 2A.4): a current SGOV holding, its current direct
+weight, and the aggregate Fixed Income allocation are all facts this packet may contain -- but CURRENT WEIGHT
+ALONE IS NOT SUFFICIENT EVIDENCE for a target or for a HOLD. Never state or imply, from current weight alone,
+that "保持当前SGOV配置"/"维持SGOV现有比例"/"SGOV作为组合稳定基石"/"当前SGOV配置最优"/"当前固收比例应保持不变"
+or any equivalent claim that the current SGOV/Fixed-Income level is optimal, a deliberate stability cornerstone,
+or should remain unchanged -- Layer 1 does not compute an optimal SGOV/Fixed-Income/cash-like target and never
+proves the current allocation is optimal. This does NOT ban HOLD, CONTROL_ADDITIONS, or WAIT for SGOV or any
+Fixed-Income holding -- those remain legitimate whenever reasoned from packet-visible facts (e.g. risk_flags,
+concentration, or the rest of asset_allocation) and clearly labeled as your own recommendation, not a Layer 1
+finding; the rule only forbids treating current weight, by itself, as proof that holding is correct.
+
 action_plan is a portfolio manager's execution memo, NOT another analysis report -- the committee members
 above already explain WHY; action_plan only answers WHAT to do, WHAT to avoid, WHICH holdings matter, WHEN to
 act, and WHAT would change the plan. A reader must be able to scan it in about 1-2 minutes, so stay concrete,
@@ -723,7 +767,8 @@ condition; prefer "暂不追加"/"维持"/"反弹时分阶段减仓"/"回调后�
   relying on it for large rebalancing, not to ask the user to fix data).
 - security_actions: prefer FEWER, higher-conviction entries -- 1-3 is the common case; do not pad up to the
   5-action maximum just to fill it. A holding that needs no real decision (already appropriately sized, no
-  new information) does not need its own entry -- fold it into the checklist's closing
+  new information) does not need its own entry -- e.g. never manufacture an SGOV or other Fixed-Income HOLD
+  card merely because that holding exists; fold it into the checklist's closing
   "其余核心仓位暂维持不变" line instead. Only include a holding that genuinely needs REDUCE/ADD/staged
   execution/explicit restraint/important review. If NO holding genuinely needs one of those, return
   security_actions as an EMPTY list -- an empty list is valid and preferred over a manufactured entry. Never
