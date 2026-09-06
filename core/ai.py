@@ -92,24 +92,34 @@ def _log_ai_failure(
     )
 
 
-def _log_ai_retry(exc: Exception, *, provider: str, model: str, status, attempt: int, max_attempts: int) -> None:
+def _log_ai_retry(
+    exc: Exception, *, provider: str, model: str, status, attempt: int, max_attempts: int,
+    stage: str = "generate_content",
+) -> None:
     """Server-side only diagnostic for a single retried transient failure
     (not yet a final failure -- _log_ai_failure still fires separately if
     every attempt is exhausted). No message/details are logged here since
-    a transient 5xx is expected and recoverable; only status/attempt."""
+    a transient 5xx is expected and recoverable; only status/attempt.
+
+    `stage` defaults to "generate_content" (the primary model's retry loop,
+    unchanged); the fallback retry loop passes "generate_content_fallback"
+    instead, so a fallback-model retry is never misread as a primary-model
+    retry in the logs."""
     logger.warning(
-        "AI provider transient failure: provider=%s model=%s stage=generate_content "
+        "AI provider transient failure: provider=%s model=%s stage=%s "
         "status=%s attempt=%d/%d retrying=True",
-        provider, model, status, attempt, max_attempts,
+        provider, model, stage, status, attempt, max_attempts,
     )
 
 
 def _log_ai_fallback(*, provider: str, primary_model: str, fallback_model: str, primary_status) -> None:
     """Server-side only diagnostic: the primary model exhausted its retries
-    with a confirmed 503, so a single fallback attempt against a distinct
-    model is about to be made. Only model identifiers and the status code
-    that triggered the fallback are logged -- never the prompt, fact
-    packet, or response content."""
+    with a confirmed 503, so a bounded fallback attempt (at most
+    _GEMINI_FALLBACK_MAX_ATTEMPTS calls, see GeminiProvider.
+    _generate_with_fallback_retry) against a distinct model is about to be
+    made. Only model identifiers and the status code that triggered the
+    fallback are logged -- never the prompt, fact packet, or response
+    content."""
     logger.warning(
         "AI provider fallback: provider=%s primary_model=%s fallback_model=%s stage=generate_content "
         "primary_status=%s fallback=True",
@@ -425,9 +435,24 @@ class ProviderUnavailable(RuntimeError):
 
 # Attempt 1 = original request, attempt 2/3 = retries -- 3 total attempts max.
 # Backoff is the wait *after* an attempt fails: ~2s after attempt 1, ~5s after
-# attempt 2, no wait after the final attempt (it just raises).
+# attempt 2, no wait after the final attempt (it just raises). Unchanged by
+# the Gemini reliability patch below -- primary retry count/timing/conditions
+# are exactly as before.
 _GEMINI_MAX_ATTEMPTS = 3
 _GEMINI_RETRY_BACKOFF_SECONDS = (2, 5)
+
+# Gemini reliability patch: the fallback model (activated only after the
+# primary exhausts _GEMINI_MAX_ATTEMPTS with a confirmed 503 -- see
+# GeminiProvider.generate) previously got exactly one, non-retried attempt.
+# A single transient 503 on that one fallback attempt was then indistinguishable
+# from a genuinely unavailable fallback model, and failed the whole analysis.
+# Attempt 1 is immediate; attempt 2 happens only if attempt 1 itself fails
+# with a confirmed 503, after a fixed ~4s wait. Any other fallback exception
+# (a different 5xx, a 4xx ClientError, an empty/malformed response) still
+# fails closed immediately, exactly as before -- see
+# GeminiProvider._generate_with_fallback_retry.
+_GEMINI_FALLBACK_MAX_ATTEMPTS = 2
+_GEMINI_FALLBACK_RETRY_BACKOFF_SECONDS = 4
 
 
 class GeminiProvider:
@@ -504,18 +529,50 @@ class GeminiProvider:
                     provider=self.name, primary_model=self.model,
                     fallback_model=self.fallback_model, primary_status=exc.code,
                 )
-                try:
-                    return self._call(self.fallback_model, prompt, schema)
-                except Exception as fallback_exc:
-                    _log_ai_failure(
-                        fallback_exc, provider=self.name, model=self.fallback_model,
-                        stage="generate_content_fallback",
-                        prompt_bytes=len(prompt.encode("utf-8")),
-                        schema_bytes=len(json.dumps(schema, ensure_ascii=False).encode("utf-8")),
-                        fallback_active=True, attempt=_GEMINI_MAX_ATTEMPTS + 1,
-                    )
-                    raise
+                return self._generate_with_fallback_retry(prompt, schema)
         raise AssertionError("unreachable: loop always returns or raises")
+
+    def _generate_with_fallback_retry(self, prompt: str, schema: dict) -> str:
+        """Bounded fallback retry (Gemini reliability patch): at most
+        _GEMINI_FALLBACK_MAX_ATTEMPTS calls against self.fallback_model.
+        Attempt 1 is immediate; attempt 2 happens only if attempt 1 fails
+        with a confirmed 503, after a fixed ~_GEMINI_FALLBACK_RETRY_BACKOFF_
+        SECONDS wait -- same model, same prompt, same schema, same config as
+        attempt 1 (just calling self._call again). Any other fallback
+        exception (a non-503 ServerError, a ClientError/4xx, an empty
+        response wrapped as ProviderUnavailable, ...) fails closed
+        immediately with no further retry, exactly like the pre-patch single
+        fallback attempt did. Never triggers a second, different fallback
+        model -- only this one bounded retry of the existing fallback."""
+        from google.genai import errors as genai_errors
+
+        def _log_final_fallback_failure(exc: Exception, attempt: int) -> None:
+            _log_ai_failure(
+                exc, provider=self.name, model=self.fallback_model,
+                stage="generate_content_fallback",
+                prompt_bytes=len(prompt.encode("utf-8")),
+                schema_bytes=len(json.dumps(schema, ensure_ascii=False).encode("utf-8")),
+                fallback_active=True, attempt=_GEMINI_MAX_ATTEMPTS + attempt,
+            )
+
+        for attempt in range(1, _GEMINI_FALLBACK_MAX_ATTEMPTS + 1):
+            try:
+                return self._call(self.fallback_model, prompt, schema)
+            except genai_errors.ServerError as exc:
+                if attempt < _GEMINI_FALLBACK_MAX_ATTEMPTS and getattr(exc, "code", None) == 503:
+                    _log_ai_retry(
+                        exc, provider=self.name, model=self.fallback_model,
+                        status=exc.code, attempt=attempt, max_attempts=_GEMINI_FALLBACK_MAX_ATTEMPTS,
+                        stage="generate_content_fallback",
+                    )
+                    time.sleep(_GEMINI_FALLBACK_RETRY_BACKOFF_SECONDS)
+                    continue
+                _log_final_fallback_failure(exc, attempt)
+                raise
+            except Exception as exc:
+                _log_final_fallback_failure(exc, attempt)
+                raise
+        raise AssertionError("unreachable: fallback loop always returns or raises")
 
 
 class AnthropicProvider:

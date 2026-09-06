@@ -262,6 +262,13 @@ else:
             except Exception as exc:
                 st.session_state.ai_result = None
                 st.session_state.ai_error = type(exc).__name__
+                # Gemini reliability patch: preserve only the structured HTTP
+                # status code (an int/None, same as the SDK's own `.code`
+                # already used server-side in core.ai's diagnostic logging --
+                # see _log_ai_failure) so the final message below can
+                # distinguish a transient 503 from every other failure mode,
+                # without ever storing the raw exception text/details.
+                st.session_state.ai_error_status = getattr(exc, "code", None)
         if st.session_state.ai_result:
             committee_view(
                 st.session_state.ai_result, holdings=holdings, quotes=st.session_state.quotes,
@@ -269,6 +276,11 @@ else:
                 usd_cad=st.session_state.usd_cad, account_type=st.session_state.account_type,
                 before_result=result,
             )
-        elif st.session_state.get("ai_error") or not (os.getenv("GEMINI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")):
+        elif st.session_state.get("ai_error"):
+            if st.session_state.get("ai_error_status") == 503:
+                st.info("AI 服务当前繁忙，请稍后重试。")
+            else:
+                st.info("AI 分析当前不可用。")
+        elif not (os.getenv("GEMINI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")):
             st.info("AI 分析当前不可用。")
     page_disclaimer()

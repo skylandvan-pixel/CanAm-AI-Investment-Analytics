@@ -448,6 +448,64 @@ def test_ai_provider_failure_shows_only_generic_message_never_raw_exception(monk
     assert app.session_state["ai_error"] == "RuntimeError"
 
 
+def test_final_503_shows_busy_message_not_generic_unavailable_message(monkeypatch):
+    """Gemini reliability patch, TESTS REQUIRED #9, #11: when the final
+    propagated provider failure (after all primary retries and the bounded
+    fallback retry are exhausted -- see core.ai.GeminiProvider) carries a
+    confirmed HTTP 503, the UI must show the specific busy-retry message
+    instead of the generic unavailable one, and must still never leak the
+    raw exception text/type."""
+    import core.ai
+    from google.genai import errors as genai_errors
+
+    def _raise(*args, **kwargs):
+        raise genai_errors.ServerError(503, {"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}})
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _raise)
+    app = _app()
+    app.session_state["ai_unlocked"] = True
+    nav = app.segmented_control(key="primary_nav")
+    nav.set_value("3 · AI 投资委员会").run(timeout=20)
+    btn = next(b for b in app.button if b.label == "启动 AI 投资委员会")
+    btn.click().run(timeout=20)
+    assert not app.exception
+    joined = "\n".join(i.value for i in app.info)
+    assert "AI 服务当前繁忙，请稍后重试。" in joined
+    assert "AI 分析当前不可用" not in joined
+    assert "high demand" not in joined
+    assert "UNAVAILABLE" not in joined
+    assert "ServerError" not in joined
+    assert app.session_state["ai_error_status"] == 503
+
+
+def test_final_non_503_error_keeps_generic_unavailable_message(monkeypatch):
+    """TESTS REQUIRED #10: a final failure that is NOT a confirmed 503 (here,
+    a permanent 400 ClientError -- e.g. an invalid/misconfigured model) must
+    keep showing the existing generic message, never the 503-specific busy
+    message."""
+    import core.ai
+    from google.genai import errors as genai_errors
+
+    def _raise(*args, **kwargs):
+        raise genai_errors.ClientError(400, {"error": {"code": 400, "message": "invalid argument", "status": "INVALID_ARGUMENT"}})
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _raise)
+    app = _app()
+    app.session_state["ai_unlocked"] = True
+    nav = app.segmented_control(key="primary_nav")
+    nav.set_value("3 · AI 投资委员会").run(timeout=20)
+    btn = next(b for b in app.button if b.label == "启动 AI 投资委员会")
+    btn.click().run(timeout=20)
+    assert not app.exception
+    joined = "\n".join(i.value for i in app.info)
+    assert "AI 分析当前不可用" in joined
+    assert "AI 服务当前繁忙" not in joined
+    assert "invalid argument" not in joined
+    assert "INVALID_ARGUMENT" not in joined
+    assert "ClientError" not in joined
+    assert app.session_state["ai_error_status"] == 400
+
+
 def test_action_plan_renders_all_sections_without_exception(monkeypatch):
     """Human-acceptance smoke test for the simplified five-section Action
     Plan (Page 3): a valid mocked committee result renders every section --
