@@ -327,8 +327,12 @@ def _format_pct(value: float | None) -> str:
 def _trade_impact_preview_html(action, *, holdings, quotes, cash, account_currency, usd_cad, account_type, before_result) -> str:
     """Returns a compact HTML snippet to nest inside the action's own
     security card, or "" when no preview should be shown (missing context,
-    non-REDUCE action, or any Step 2A suppression rule -- see
-    core.trade_preview.build_trade_impact_preview)."""
+    an ineligible action, or any Step 2A suppression rule -- see
+    core.trade_preview.build_trade_impact_preview). REDUCE_ON_REBOUND (Step
+    2A.2) shares the exact same deterministic math as REDUCE -- the
+    difference is purely presentational: this is the one place that must
+    label it as a conditional scenario, never as an instruction to sell
+    now."""
     if None in (holdings, quotes, cash, account_currency, account_type, before_result):
         return ""
     preview = build_trade_impact_preview(
@@ -351,10 +355,20 @@ def _trade_impact_preview_html(action, *, holdings, quotes, cash, account_curren
         f"约 {preview.trade_currency} {preview.estimated_realized_gain_loss:,.0f}（基于已保存的平均成本，估算值，非税务估算）"
         if preview.gain_loss_available else "暂不可估算（平均成本币种未确认）"
     )
+    is_conditional = action.action == "REDUCE_ON_REBOUND"
+    heading = "条件触发后的交易影响预览（Conditional Trade Impact Preview）" if is_conditional else "交易影响预览（Trade Impact Preview）"
+    request_line = (
+        f"若触发条件成立，届时仓位减少约 {preview.requested_position_reduction_pct:.0f}%"
+        if is_conditional else f"请求：当前仓位减少约 {preview.requested_position_reduction_pct:.0f}%"
+    )
+    conditional_note = (
+        '<br><span style="font-size:.75rem;color:#8AA0B8">仅表示触发条件满足后的情景预览，不代表当前立即执行。</span>'
+        if is_conditional else ""
+    )
     return (
         f'<div class="ap-security-meta" style="margin-top:.5rem;padding-top:.5rem;border-top:1px dashed #E2EAF4">'
-        f'<b>交易影响预览（Trade Impact Preview）</b><br>'
-        f'请求：当前仓位减少约 {preview.requested_position_reduction_pct:.0f}%'
+        f'<b>{heading}</b><br>'
+        f'{request_line}'
         f'（可执行约 {preview.executable_shares:.0f} 股，对应约 {preview.executable_position_reduction_pct:.1f}%）<br>'
         f'预计交易金额：约 {preview.trade_currency} {preview.trade_value:,.0f}<br>'
         f'预计已实现盈亏：{gain_loss_line}<br>'
@@ -363,6 +377,7 @@ def _trade_impact_preview_html(action, *, holdings, quotes, cash, account_curren
         f'{exposure_prefix}{_format_pct(preview.after_identified_exposure)}　'
         f'Top-5 集中度：{_format_pct(preview.before_top5_concentration)} → {_format_pct(preview.after_top5_concentration)}<br>'
         f'<span style="font-size:.75rem;color:#8AA0B8">假设：卖出所得暂存为现金，不预设再投资标的；本预览为本地确定性估算，不构成税务建议。</span>'
+        f'{conditional_note}'
         f'</div>'
     )
 

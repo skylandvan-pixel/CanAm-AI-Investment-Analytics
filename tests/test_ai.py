@@ -33,7 +33,7 @@ VALID = {
             {
                 "ticker": "NVDA", "action": "REDUCE_ON_REBOUND", "priority": "高",
                 "target": "反弹时分阶段减仓约15%-20%", "trigger": "若反弹至近期压力区",
-                "reason": "单一标的集中度过高",
+                "reason": "单一标的集中度过高", "position_reduction_pct": 15.0,
             },
         ],
         "timeline_now": ["复核NVDA仓位"],
@@ -567,20 +567,27 @@ def test_action_plan_accepts_qualified_trigger_containing_vague_word():
 def test_position_reduction_pct_out_of_range_rejected_by_local_validation(pct):
     """Codex P0 fix: since position_reduction_pct carries no Pydantic gt/lt
     (to avoid exclusiveMinimum/exclusiveMaximum in the Gemini-facing
-    schema), the strict (0, 100) range must be enforced locally instead."""
+    schema), the strict (0, 100) range must be enforced locally instead.
+    action is forced to "REDUCE" here so this specifically exercises the
+    range check, not the (also-rejecting, but differently-reasoned)
+    Step 2A.1 REDUCE-contract check."""
     from core.ai import _validate_action_plan_quality
 
     broken = _action_plan()
+    broken["security_actions"][0]["action"] = "REDUCE"
     broken["security_actions"][0]["position_reduction_pct"] = pct
     parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
-    with pytest.raises(ValueError, match="position_reduction_pct"):
+    with pytest.raises(ValueError, match="out of range"):
         _validate_action_plan_quality(parsed.action_plan)
 
 
 def test_position_reduction_pct_within_range_passes_local_validation():
+    """Updated for Step 2A.1: position_reduction_pct is only ever meaningful
+    (and only ever permitted) on an action=="REDUCE" entry."""
     from core.ai import _validate_action_plan_quality
 
     broken = _action_plan()
+    broken["security_actions"][0]["action"] = "REDUCE"
     broken["security_actions"][0]["position_reduction_pct"] = 10.0
     parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
     _validate_action_plan_quality(parsed.action_plan)  # must not raise
@@ -588,10 +595,136 @@ def test_position_reduction_pct_within_range_passes_local_validation():
 
 def test_payload_without_position_reduction_pct_field_still_validates():
     """Backward compatibility: an old cached response (or any response that
-    simply omits the optional field) must continue to validate cleanly --
-    position_reduction_pct defaults to None."""
-    parsed = CommitteeResult.model_validate(VALID)  # VALID never sets this field
+    simply omits the optional field) for a non-reduction action must
+    continue to validate cleanly -- position_reduction_pct defaults to
+    None."""
+    from core.ai import _validate_action_plan_quality
+
+    broken = _action_plan()
+    broken["security_actions"][0]["action"] = "HOLD"
+    del broken["security_actions"][0]["position_reduction_pct"]
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
     assert parsed.action_plan.security_actions[0].position_reduction_pct is None
+    _validate_action_plan_quality(parsed.action_plan)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Step 2A.1: REDUCE Action Contract Fix. Production observation: Gemini
+# produced action=REDUCE with a target-WEIGHT range (e.g. "目标权重
+# 15%-20%") but left position_reduction_pct null -- the local Trade Impact
+# Preview correctly failed closed (no preview), but that means the AI
+# response itself violated the contract and should never have been treated
+# as a valid final answer. These tests lock in: REDUCE always requires a
+# usable pct (never derived from target's free text), and a non-REDUCE
+# action must never carry one either.
+# ---------------------------------------------------------------------------
+
+def test_reduce_with_valid_position_reduction_pct_passes():
+    """A."""
+    from core.ai import _validate_action_plan_quality
+
+    broken = _action_plan()
+    broken["security_actions"][0]["action"] = "REDUCE"
+    broken["security_actions"][0]["position_reduction_pct"] = 20.0
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
+    _validate_action_plan_quality(parsed.action_plan)  # must not raise
+
+
+def test_reduce_with_missing_position_reduction_pct_fails_closed():
+    """B: this is the exact production bug -- action=REDUCE with pct left
+    null must fail closed, not silently render no preview."""
+    from core.ai import _validate_action_plan_quality
+
+    broken = _action_plan()
+    broken["security_actions"][0]["action"] = "REDUCE"
+    broken["security_actions"][0]["position_reduction_pct"] = None
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
+    with pytest.raises(ValueError, match="missing position_reduction_pct"):
+        _validate_action_plan_quality(parsed.action_plan)
+
+
+@pytest.mark.parametrize("bad_pct", [float("nan"), float("inf"), float("-inf")])
+def test_reduce_with_non_finite_position_reduction_pct_fails_closed(bad_pct):
+    """E."""
+    from core.ai import _validate_action_plan_quality
+
+    broken = _action_plan()
+    broken["security_actions"][0]["action"] = "REDUCE"
+    broken["security_actions"][0]["position_reduction_pct"] = bad_pct
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
+    with pytest.raises(ValueError, match="out of range"):
+        _validate_action_plan_quality(parsed.action_plan)
+
+
+def test_non_reduce_action_with_null_position_reduction_pct_passes():
+    """F: HOLD (or any non-REDUCE action) with pct left null is the normal,
+    expected shape and must pass."""
+    from core.ai import _validate_action_plan_quality
+
+    broken = _action_plan()
+    broken["security_actions"][0]["action"] = "HOLD"
+    broken["security_actions"][0]["position_reduction_pct"] = None
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
+    _validate_action_plan_quality(parsed.action_plan)  # must not raise
+
+
+def test_non_reduce_action_with_position_reduction_pct_fails_closed():
+    """G: a non-REDUCE/REDUCE_ON_REBOUND action carrying a reduction
+    percentage is contradictory structured output (the field's only defined
+    meaning is "current-position reduction, immediate or trigger-
+    contingent") -- fail closed rather than silently ignoring a meaningful
+    execution field."""
+    from core.ai import _validate_action_plan_quality
+
+    broken = _action_plan()
+    broken["security_actions"][0]["action"] = "HOLD"
+    broken["security_actions"][0]["position_reduction_pct"] = 20.0
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
+    with pytest.raises(ValueError, match="only valid for action in"):
+        _validate_action_plan_quality(parsed.action_plan)
+
+
+def test_reduce_with_target_weight_range_text_but_no_pct_fails_closed():
+    """H: reproduces the exact production observation -- action=REDUCE,
+    target states a target PORTFOLIO WEIGHT range ("目标权重 15%-20%"), and
+    position_reduction_pct is left null. Free-text target must never
+    substitute for the structured field -- this must fail closed, not
+    render silently without a preview."""
+    from core.ai import _validate_action_plan_quality
+
+    broken = _action_plan()
+    broken["security_actions"][0]["action"] = "REDUCE"
+    broken["security_actions"][0]["target"] = "建议将直接持仓权重分步降至 15%-20% 区间"
+    broken["security_actions"][0]["position_reduction_pct"] = None
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
+    with pytest.raises(ValueError, match="missing position_reduction_pct"):
+        _validate_action_plan_quality(parsed.action_plan)
+
+
+def test_old_cached_payload_without_reduce_action_still_valid():
+    """I (no-REDUCE branch): a payload with no REDUCE action anywhere and no
+    position_reduction_pct field at all (the pre-Step-2A shape) must remain
+    fully valid -- this is exactly VALID itself (action=REDUCE_ON_REBOUND)."""
+    from core.ai import _validate_action_plan_quality
+
+    parsed = CommitteeResult.model_validate(VALID)
+    _validate_action_plan_quality(parsed.action_plan)  # must not raise
+
+
+def test_old_cached_payload_with_reduce_action_and_no_pct_field_fails_closed():
+    """I (REDUCE branch): an old-shaped payload that happens to have
+    action=REDUCE but was produced before this field existed (so the key is
+    entirely absent, not just null) must still fail closed -- the contract
+    requires an actual usable percentage, not merely "the field is absent
+    so we can't check it"."""
+    from core.ai import _validate_action_plan_quality
+
+    broken = _action_plan()
+    broken["security_actions"][0]["action"] = "REDUCE"
+    del broken["security_actions"][0]["position_reduction_pct"]
+    parsed = CommitteeResult.model_validate({**VALID, "action_plan": broken})
+    with pytest.raises(ValueError, match="missing position_reduction_pct"):
+        _validate_action_plan_quality(parsed.action_plan)
 
 
 def test_run_ai_analysis_fails_closed_on_bare_vague_trigger(tmp_path, mixed_result):
@@ -601,6 +734,34 @@ def test_run_ai_analysis_fails_closed_on_bare_vague_trigger(tmp_path, mixed_resu
     broken["security_actions"][0]["trigger"] = "明显反弹"
     with pytest.raises(ProviderUnavailable):
         run_ai_analysis(mixed_result, provider=FakeProvider({**VALID, "action_plan": broken}), cache_dir=tmp_path)
+
+
+def test_run_ai_analysis_fails_closed_on_production_reduce_without_pct(tmp_path, mixed_result):
+    """Step 2A.1 full-path regression: reproduces the exact production
+    observation end-to-end (not just the isolated validator) -- a
+    schema-valid, ticker-valid, within-limits REDUCE response with a
+    target-weight-range text and no position_reduction_pct must fail
+    closed via the existing safe AI-failure path (ProviderUnavailable),
+    never silently render an Action Plan with no Trade Impact Preview."""
+    broken = _action_plan()
+    broken["security_actions"][0]["action"] = "REDUCE"
+    broken["security_actions"][0]["target"] = "建议将直接持仓权重分步降至 15%-20% 区间"
+    broken["security_actions"][0]["position_reduction_pct"] = None
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, provider=FakeProvider({**VALID, "action_plan": broken}), cache_dir=tmp_path)
+
+
+def test_run_ai_analysis_succeeds_when_reduce_carries_valid_pct(tmp_path, mixed_result):
+    """Manual synthetic contract test (section 11): a REDUCE action with a
+    proper position_reduction_pct=20 must validate and succeed end-to-end --
+    Gemini only ever supplies the abstract percentage; no raw quantity was
+    needed to produce a valid response."""
+    fixed = _action_plan()
+    fixed["security_actions"][0]["action"] = "REDUCE"
+    fixed["security_actions"][0]["position_reduction_pct"] = 20.0
+    result, meta = run_ai_analysis(mixed_result, provider=FakeProvider({**VALID, "action_plan": fixed}), cache_dir=tmp_path)
+    assert result.action_plan.security_actions[0].position_reduction_pct == 20.0
+    assert meta["success"] is True
 
 
 def test_prompt_includes_coverage_aware_lower_bound_guidance():
@@ -659,12 +820,57 @@ def test_prompt_distinguishes_ai_target_from_deterministic_fact():
 
 
 def test_prompt_includes_fund_destination_guardrail():
-    """Section 10: never claim an unverified destination reduces
-    concentration; prefer generic wording over naming an unverified ETF."""
+    """Section 10 (Step 1); strengthened with explicit named-ticker examples
+    in Step 2A.2: never claim an unverified destination reduces
+    concentration; prefer generic wording over naming an unverified ETF
+    such as VOO/SGOV."""
     from core.ai import _prompt
 
     text = _prompt({})
-    assert "转向经穿透验证后能够降低集中度的资产" in text
+    assert "转向经穿透验证后确认能够降低集中度的资产" in text
+    assert "VOO" in text and "SGOV" in text  # named as forbidden examples, not recommendations
+
+
+def test_prompt_forbids_complete_lookthrough_coverage_claims():
+    """Section 7 (Step 2A.2, L): "complete" coverage must never be described
+    as exhaustive/100% look-through -- production regression: "完全穿透覆盖
+    （覆盖率约38.39%）" is self-contradictory (a 38% figure cannot be
+    "complete"). Prompt must forbid the specific phrases and prefer
+    user-friendly, non-jargon wording naming the actual identified
+    coverage."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    for forbidden in ("完全穿透覆盖", "100%穿透", "完整真实暴露"):
+        assert forbidden in text  # named explicitly as forbidden, i.e. quoted in the guardrail itself
+    assert "fully exhaustive" in normalized.lower() or "exhaustive look-through" in normalized.lower()
+    assert "已获得穿透数据" in text  # the preferred, user-friendly alternative phrasing
+
+
+def test_prompt_still_preserves_lower_bound_identified_exposure_semantics():
+    """M: the Step 2A.2 coverage-wording addition must not weaken or remove
+    Step 1's "≥" lower-bound framing requirement."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    normalized = " ".join(text.split())
+    assert "lower bound" in normalized.lower()
+    assert "≥" in text
+    assert "lookthrough_coverage" in text
+
+
+def test_prompt_forbids_tax_lot_sequencing_claims():
+    """N: no tax-lot history/identification exists -- the AI must never
+    claim which lot/batch to sell (production regression: "优先卖出高成本
+    份额"). Only a generic "verify actual cost basis" instruction is
+    allowed."""
+    from core.ai import _prompt
+
+    text = _prompt({})
+    assert "优先卖出高成本份额" in text  # named explicitly as the forbidden example
+    assert "tax-lot" in text.lower() or "税务摩擦" in text or "成本基础" in text
+    assert "减仓前核对实际成本基础与潜在税务影响" in text  # the one allowed phrasing
 
 
 def test_prompt_prefers_fewer_security_actions():

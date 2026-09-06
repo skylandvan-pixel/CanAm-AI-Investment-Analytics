@@ -260,6 +260,14 @@ def _validate_action_plan_limits(plan: ActionPlan) -> None:
 # qualifying it -- not executable on its own.
 _VAGUE_TRIGGER_PHRASES = frozenset({"逢高", "明显反弹", "适度减仓", "分阶段优化"})
 
+# Actions whose sizing is a single, well-defined "reduce X% of the current
+# position" (immediately for REDUCE, or contingent on `trigger` for
+# REDUCE_ON_REBOUND) -- the only two labels position_reduction_pct is valid
+# for (Step 2A.2). STAGED_SELL is deliberately excluded: it represents an
+# open-ended multi-tranche plan, not a single quantifiable reduction, so it
+# stays preview-ineligible and pct-less, same as before Step 2A.2.
+_REDUCTION_PCT_REQUIRED_ACTIONS = frozenset({"REDUCE", "REDUCE_ON_REBOUND"})
+
 
 def _validate_action_plan_quality(plan: ActionPlan) -> None:
     """Fail-closed guardrail against bare vague-trigger phrasing (product
@@ -268,18 +276,37 @@ def _validate_action_plan_quality(plan: ActionPlan) -> None:
     phrases the product review called out, so a concrete anchored trigger
     that happens to use one of these words is never rejected.
 
-    Also enforces the strict (0, 100) range on SecurityAction.
-    position_reduction_pct (Step 2A) locally, since that field deliberately
-    carries no gt/lt Pydantic constraint (see SecurityAction) to avoid
-    emitting exclusiveMinimum/exclusiveMaximum into the Gemini-facing
-    schema."""
+    Also enforces the REDUCE / REDUCE_ON_REBOUND / position_reduction_pct
+    contract (Step 2A.1, extended in Step 2A.2): both actions always carry a
+    usable (0, 100) position_reduction_pct -- a target-weight range in
+    `target` (e.g. "目标权重 15%-20%") is a semantically different number
+    and must never substitute for it, so either action with a null pct
+    fails closed here rather than silently rendering no Trade Impact
+    Preview. Conversely, any other action (HOLD, WAIT, STAGED_SELL, ...)
+    carrying a non-null position_reduction_pct is contradictory structured
+    output (that field's only defined meaning is "current-position
+    reduction, immediate or trigger-contingent") and also fails closed,
+    rather than being silently ignored. This field deliberately carries no
+    gt/lt Pydantic constraint (see SecurityAction) to avoid emitting
+    exclusiveMinimum/exclusiveMaximum into the Gemini-facing schema, so the
+    (0, 100) range itself is also enforced here."""
     for action in plan.security_actions:
         trigger = action.trigger.strip()
         if trigger in _VAGUE_TRIGGER_PHRASES:
             raise ValueError(f"action plan trigger for {action.ticker} is an unqualified vague phrase: {trigger!r}")
         pct = action.position_reduction_pct
-        if pct is not None and not (0 < pct < 100):
-            raise ValueError(f"action plan position_reduction_pct for {action.ticker} out of range (0, 100): {pct!r}")
+        if action.action in _REDUCTION_PCT_REQUIRED_ACTIONS:
+            if pct is None:
+                raise ValueError(
+                    f"action plan {action.action} action for {action.ticker} is missing position_reduction_pct"
+                )
+            if not (0 < pct < 100):
+                raise ValueError(f"action plan position_reduction_pct for {action.ticker} out of range (0, 100): {pct!r}")
+        elif pct is not None:
+            raise ValueError(
+                f"action plan position_reduction_pct for {action.ticker} is only valid for "
+                f"action in {sorted(_REDUCTION_PCT_REQUIRED_ACTIONS)!r}, got action={action.action!r}"
+            )
 
 
 class TextProvider(Protocol):
@@ -444,7 +471,17 @@ figure may be stated directly without the ≥ qualifier only when that entry's i
 (i.e. it comes entirely from a direct holding, with no ETF look-through involved) -- data_quality.
 lookthrough_coverage being "complete" means every held ETF has some published constituent data, never that
 100% of that ETF's holdings are named, so it alone never justifies dropping the qualifier for any figure
-that includes an indirect/ETF-sourced component.
+that includes an indirect/ETF-sourced component. For this same reason, never describe the coverage STATE
+itself as "完全穿透覆盖"/"100%穿透"/"完整真实暴露"/fully exhaustive look-through/complete constituent
+coverage -- those claim every underlying holding is identified, which "complete" never means. Prefer
+plain, user-friendly wording that states the actual identified/verified weight, e.g. "已获得穿透数据，当前
+可验证底层权重覆盖约38.39%", not internal jargon like "coverage=complete".
+
+Tax-lot rule: this system has no tax-lot/share-batch history and no cost-basis-currency guarantee (see
+data_quality and the local Trade Impact Preview). Never claim or recommend which lot/batch of shares to
+sell, a "high-cost lot," a "low-gain lot," tax-lot sequencing, or specific-identification strategy (e.g.
+never "优先卖出高成本份额"). You may only say to verify actual cost basis and potential tax impact before
+reducing (e.g. "减仓前核对实际成本基础与潜在税务影响").
 
 Decision-confidence rule: decision confidence must never exceed data confidence. When look-through coverage
 is materially incomplete (see above), do not justify a major action -- a REDUCE-type security action, or a
@@ -457,8 +494,9 @@ concentration, a risk-management action grounded in that direct data is still ap
 Fund-destination rule: never claim that moving proceeds from a reduced holding into another named ETF or
 fund meaningfully lowers that stock's or sector's concentration unless this packet's own asset_allocation or
 top_true_exposures data already supports that specific destination's effect. If the destination's
-look-through effect cannot be verified from this packet, do not name a specific replacement security -- use
-general wording such as "转向经穿透验证后能够降低集中度的资产" instead of naming a broad ETF by ticker.
+look-through effect cannot be verified from this packet, do not name a specific replacement security (e.g.
+never "核心宽基ETF（如VOO）"/"如SGOV" as a concentration-reducing destination) -- use general wording such as
+"转向经穿透验证后确认能够降低集中度的资产" instead of naming a broad ETF by ticker.
 
 action_plan is a portfolio manager's execution memo, NOT another analysis report -- the committee members
 above already explain WHY; action_plan only answers WHAT to do, WHAT to avoid, WHICH holdings matter, WHEN to
@@ -499,11 +537,21 @@ condition; prefer "暂不追加"/"维持"/"反弹时分阶段减仓"/"回调后�
   not already implied by this packet. If the trigger is conditional on a market state that may never occur
   (e.g. "反弹后减仓"), also state a time-based reassessment backstop in trigger or reason (e.g. "若X个月内
   未出现该条件，应重新评估该持仓与集中度") -- this is a reassessment prompt, never an automatic forced trade
-  after a fixed period. reason is one concise explanation. position_reduction_pct: ONLY when action is
-  exactly "REDUCE" and target already states one specific relative reduction of the current share position
-  (never a portfolio-weight change, never a range), set this field to that same percentage as a plain
-  number (e.g. 10 for "减仓约10%"); leave it null for every other action, for a range/qualitative target, or
-  when the reduction is conditional on a trigger rather than a specific percentage right now.
+  after a fixed period. reason is one concise explanation. position_reduction_pct: REQUIRED (never null)
+  whenever action is "REDUCE" or "REDUCE_ON_REBOUND" -- this holds even when target is phrased as a target
+  portfolio weight, a range, or otherwise qualitative (e.g. "目标权重 15%-20%" or "分步降至更合理区间"). It
+  is a completely different number from target: it is the percentage of the CURRENT SHARE POSITION to
+  reduce (e.g. current position = 100 shares, position_reduction_pct = 20 => reduce by approximately 20
+  shares before whole-share rounding), never a target weight, a percentage-point weight change, a
+  percentage of total portfolio, or a percentage of sale proceeds. Never derive it from a target-weight
+  range in target -- a target weight depends on the rest of the portfolio and future prices, not on the
+  current share count, so you must independently choose a reasonable current-position reduction percentage
+  as a plain number (e.g. 20) even while target still describes the target weight. For "REDUCE" this is an
+  immediate proposed reduction; for "REDUCE_ON_REBOUND" it is the reduction to execute IF/WHEN trigger is
+  satisfied, not now -- keep trigger explicit and never phrase target/reason as if execution were immediate
+  (e.g. "如果反弹触发条件成立，届时减持约15%", never "现在立刻减持15%"). Leave position_reduction_pct null
+  for every other action (e.g. STAGED_SELL is an open-ended multi-tranche plan, not one quantifiable
+  reduction -- do not force a single percentage onto it).
 - timeline_now / timeline_30_days / timeline_3_months / timeline_6_12_months: at most 2-3 concise investor
   actions per horizon (never an internal data/system task), absorbing any longer-term structural migration
   (e.g. shifting toward more core-ETF weight, trimming a concentrated position over time) into the horizon

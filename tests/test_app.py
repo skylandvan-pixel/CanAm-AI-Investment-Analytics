@@ -535,6 +535,50 @@ def test_trade_impact_preview_renders_for_reduce_action_with_reduction_pct(monke
         assert forbidden not in joined
 
 
+def test_trade_impact_preview_is_marked_conditional_for_reduce_on_rebound(monkeypatch):
+    """Step 2A.2 human-acceptance smoke test (I/J): a REDUCE_ON_REBOUND
+    security_action with position_reduction_pct set must still render the
+    same deterministic before/after numbers, but as an explicitly
+    CONDITIONAL preview -- never with immediate-execution wording."""
+    import json
+
+    import core.ai
+    from tests.test_ai import VALID
+
+    action_plan = json.loads(json.dumps(VALID["action_plan"]))
+    action_plan["security_actions"][0] = {
+        "ticker": "NVDA", "action": "REDUCE_ON_REBOUND", "priority": "高",
+        "target": "AI建议减持直接持仓约15%-20%，使穿透暴露控制在合理区间",
+        "trigger": "若NVDA重新回到近期相对强势区间",
+        "reason": "直接权重偏高，具体交易影响见下方本地确定性预览。",
+        "position_reduction_pct": 15.0,
+    }
+    parsed = core.ai.CommitteeResult.model_validate({**VALID, "action_plan": action_plan})
+
+    def _fake_run_ai_analysis(result, **kwargs):
+        return parsed, {"provider": "gemini", "model": "gemini-3.6-flash", "cache_hit": False}
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _fake_run_ai_analysis)
+    app = _app()
+    app.session_state["ai_unlocked"] = True
+    nav = app.segmented_control(key="primary_nav")
+    nav.set_value("3 · AI 投资委员会").run(timeout=20)
+    btn = next(b for b in app.button if b.label == "启动 AI 投资委员会")
+    btn.click().run(timeout=20)
+    assert not app.exception
+
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "条件触发后的交易影响预览" in joined  # I: explicitly marked conditional
+    assert "Conditional Trade Impact Preview" in joined
+    assert "仅表示触发条件满足后的情景预览，不代表当前立即执行" in joined
+    assert "可执行约 8 股" in joined  # floor(55 * 15%) = 8, same deterministic math as REDUCE
+    # J: must never phrase this as an instruction to execute right now (the
+    # disclaimer itself legitimately contains "...不代表当前立即执行" as a
+    # negation, so check for the affirmative phrasing specifically).
+    for forbidden in ("现在立刻减持", "请立即执行", "立刻卖出", "请求：当前仓位减少约"):
+        assert forbidden not in joined
+
+
 def test_runtime_version_logs_short_source_version(monkeypatch, caplog):
     """Diagnostic patch: with SOURCE_VERSION set (as Streamlit Cloud sets it
     to the deployed commit hash), the startup log must report only a short

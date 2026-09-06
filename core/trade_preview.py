@@ -99,13 +99,19 @@ def build_trade_impact_preview(
 ) -> TradeImpactPreview | None:
     """Returns None whenever the preview cannot be produced safely -- the
     caller must then show nothing (never fabricate a partial preview). This
-    is the single, complete suppression gate: action must be exactly
-    "REDUCE", position_reduction_pct must be a usable (0, 100) percentage,
-    the ticker must be a real direct holding with an available price, and
-    the requested reduction must not round down to zero executable
-    shares -- any one of these failing means no preview, never a partial
-    one."""
-    if action != "REDUCE" or position_reduction_pct is None:
+    is the single, complete suppression gate: action must be "REDUCE" (an
+    immediate proposed reduction) or "REDUCE_ON_REBOUND" (a conditional
+    reduction sized the same way, to execute IF/WHEN its trigger is
+    satisfied -- the caller is responsible for labeling that preview as
+    conditional, since this function's deterministic math is identical
+    either way), position_reduction_pct must be a usable (0, 100)
+    percentage, the ticker must be a real direct holding with an available
+    price, and the requested reduction must not round down to zero
+    executable shares -- any one of these failing means no preview, never a
+    partial one. STAGED_SELL and every other action remain ineligible
+    (Step 2A.2 deliberately does not extend this to an open-ended
+    multi-tranche plan)."""
+    if action not in ("REDUCE", "REDUCE_ON_REBOUND") or position_reduction_pct is None:
         return None
     if not (0 < position_reduction_pct < 100):
         return None

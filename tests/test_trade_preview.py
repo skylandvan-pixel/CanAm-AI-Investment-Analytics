@@ -39,6 +39,23 @@ def test_ten_percent_reduction_floor_rounds_shares(synthetic_two_stock):
     assert preview.executable_position_reduction_pct == pytest.approx(14 / 143 * 100, abs=0.01)
 
 
+def test_reduce_on_rebound_is_eligible_for_preview_with_identical_math(synthetic_two_stock):
+    """G/H (Step 2A.2): REDUCE_ON_REBOUND is now eligible, producing exactly
+    the same deterministic math as REDUCE for equal inputs -- only the
+    timing semantics differ (conditional vs immediate), which is a UI-level
+    labeling concern, not a different calculation. See core.trade_preview.
+    build_trade_impact_preview's docstring: the caller (ui.py) is
+    responsible for marking a REDUCE_ON_REBOUND preview as conditional."""
+    holdings, quotes = synthetic_two_stock
+    reduce_preview = _preview(holdings, quotes, ticker="ACME", action="REDUCE", position_reduction_pct=15.0)
+    rebound_preview = _preview(holdings, quotes, ticker="ACME", action="REDUCE_ON_REBOUND", position_reduction_pct=15.0)
+    assert reduce_preview is not None and rebound_preview is not None
+    assert rebound_preview.executable_shares == reduce_preview.executable_shares
+    assert rebound_preview.trade_value == reduce_preview.trade_value
+    assert rebound_preview.after_direct_weight == reduce_preview.after_direct_weight
+    assert rebound_preview.after_identified_exposure == reduce_preview.after_identified_exposure
+
+
 def test_executable_shares_never_exceed_current_quantity():
     """B: even a reduction pct very close to 100 must never sell more than
     the held quantity, for a small integer position."""
@@ -236,12 +253,14 @@ def test_invalid_ticker_suppresses_preview(synthetic_two_stock):
 
 
 def test_non_reduce_action_suppresses_preview(synthetic_two_stock):
-    """S."""
+    """S. As of Step 2A.2, REDUCE_ON_REBOUND is also eligible (see
+    test_reduce_on_rebound_is_eligible_for_preview below) -- HOLD and
+    STAGED_SELL remain the genuinely ineligible cases."""
     holdings, quotes = synthetic_two_stock
     preview = _preview(holdings, quotes, ticker="ACME", action="HOLD", position_reduction_pct=10.0)
     assert preview is None
-    preview_none_action = _preview(holdings, quotes, ticker="ACME", action="REDUCE_ON_REBOUND", position_reduction_pct=10.0)
-    assert preview_none_action is None
+    preview_staged_sell = _preview(holdings, quotes, ticker="ACME", action="STAGED_SELL", position_reduction_pct=10.0)
+    assert preview_staged_sell is None
 
 
 @pytest.mark.parametrize("pct", [100.0, 150.0])
