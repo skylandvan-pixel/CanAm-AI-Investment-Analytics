@@ -293,6 +293,94 @@ def test_treemap_selection_resets_when_portfolio_changes():
     assert app.session_state["treemap_selected"] is None
 
 
+def test_security_profile_shows_key_dates_section_for_known_security(monkeypatch):
+    """Step 2A.5: selecting a security whose deterministic Key Dates lookup
+    returns relevant events shows the 关键关注日期（Key Dates）subsection
+    inside the same Security Profile card, below the existing description/
+    weight content."""
+    import ui
+    from datetime import date
+
+    from core.key_dates import SecurityKeyDate
+
+    monkeypatch.setattr(ui, "get_security_key_dates", lambda ticker: [
+        SecurityKeyDate(date(2026, 9, 16), "fomc", "美联储 FOMC 利率决议", "confirmed", "关注利率路径", "fomc_reference"),
+        SecurityKeyDate(date(2026, 11, 17), "earnings", "NVDA 下一季度财报", "estimated", "关注集中度变化", "yfinance"),
+    ])
+    app = _app()
+    app.session_state["treemap_selected"] = "NVDA"
+    app.run(timeout=20)
+    assert not app.exception
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "英伟达" in joined  # existing profile content still present
+    assert "关键关注日期" in joined
+    assert "美联储 FOMC 利率决议" in joined and "2026-09-16" in joined
+    assert "NVDA 下一季度财报" in joined and "预计 2026-11-17" in joined
+
+
+def test_key_dates_content_updates_when_selected_ticker_changes(monkeypatch):
+    """Step 2A.5 requirement #15: the Key Dates list must update
+    automatically when the selected security changes -- never show a
+    previous ticker's stale dates."""
+    import ui
+    from datetime import date
+
+    from core.key_dates import SecurityKeyDate
+
+    def _fake(ticker):
+        if ticker == "NVDA":
+            return [SecurityKeyDate(date(2026, 11, 17), "earnings", "NVDA 下一季度财报", "estimated", "n", "yfinance")]
+        if ticker == "AAPL":
+            return [SecurityKeyDate(date(2026, 10, 29), "earnings", "AAPL 下一季度财报", "estimated", "n", "yfinance")]
+        return []
+
+    monkeypatch.setattr(ui, "get_security_key_dates", _fake)
+    app = _app()
+    app.session_state["treemap_selected"] = "NVDA"
+    app.run(timeout=20)
+    joined_nvda = "\n".join(m.value for m in app.markdown)
+    assert "NVDA 下一季度财报" in joined_nvda and "AAPL 下一季度财报" not in joined_nvda
+
+    app.session_state["treemap_selected"] = "AAPL"
+    app.run(timeout=20)
+    joined_aapl = "\n".join(m.value for m in app.markdown)
+    assert "AAPL 下一季度财报" in joined_aapl and "NVDA 下一季度财报" not in joined_aapl
+
+
+def test_no_relevant_key_dates_omits_subsection_cleanly(monkeypatch):
+    """Preferred fail-closed behavior: when there are no relevant future
+    events, the Key Dates subsection is omitted entirely -- no "N/A",
+    "Unknown", or "暂无数据"-style filler line."""
+    import ui
+
+    monkeypatch.setattr(ui, "get_security_key_dates", lambda ticker: [])
+    app = _app()
+    app.session_state["treemap_selected"] = "NVDA"
+    app.run(timeout=20)
+    assert not app.exception
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "英伟达" in joined  # profile card itself still renders
+    assert "关键关注日期" not in joined
+    for forbidden in ("N/A", "Unknown", "数据不可用", "暂无关键日期"):
+        assert forbidden not in joined
+
+
+def test_key_dates_selection_requires_no_gemini_or_anthropic_call(monkeypatch):
+    """Step 2A.5: Security Key Dates is Layer 1 / core product behavior --
+    selecting a security on Page 1 must never touch core.ai, regardless of
+    Pro unlock, beta code, or Gemini/Anthropic configuration."""
+    import core.ai
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("Page 1 security selection must never call run_ai_analysis")
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _forbidden)
+    app = _app()
+    app.session_state["treemap_selected"] = "NVDA"
+    app.run(timeout=20)
+    assert not app.exception
+
+
 def test_risk_level_value_is_chinese_only_no_english_suffix():
     app = _app()
     assert not app.exception

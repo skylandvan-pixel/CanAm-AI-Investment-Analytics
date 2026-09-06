@@ -5,6 +5,7 @@ import plotly.express as px
 import streamlit as st
 
 from core.analytics import treemap_rows
+from core.key_dates import get_security_key_dates, format_event_date
 from core.models import AnalyticsResult
 from core.reference import ASSET_CLASS_LABELS_EN, ASSET_CLASS_LABELS_ZH
 from core.security_profile import resolve_security_profile
@@ -138,6 +139,32 @@ def page_disclaimer() -> None:
     )
 
 
+def _key_dates_html(events: list) -> str:
+    """Pure HTML builder for the Key Dates subsection (Step 2A.5) -- takes
+    already-fetched, already-filtered/sorted/capped SecurityKeyDate objects
+    (see core.key_dates.get_security_key_dates) and returns "" when there
+    are none, so the caller can omit the whole subsection cleanly rather
+    than rendering an empty heading. Reuses the existing Action Plan
+    calendar-row classes (.ap-calendar-row/.ap-calendar-date/.ap-calendar-
+    event/.ap-calendar-reassess) with a 3-column override instead of adding
+    new CSS -- same low-saturation blue visual system, no new large section."""
+    if not events:
+        return ""
+    rows = "".join(
+        f'<div class="ap-calendar-row" style="grid-template-columns:5.6rem 1fr 1.3fr;padding:.4rem 0">'
+        f'<span class="ap-calendar-date">{format_event_date(event)}</span>'
+        f'<span class="ap-calendar-event">{event.title_zh}</span>'
+        f'<span class="ap-calendar-reassess">{event.relevance_note}</span>'
+        f'</div>'
+        for event in events
+    )
+    return (
+        '<div style="margin-top:.9rem;color:#3B6690;font-size:.72rem;font-weight:720;'
+        'letter-spacing:.08em;text-transform:uppercase">关键关注日期（Key Dates）</div>'
+        f'<div style="margin-top:.3rem">{rows}</div>'
+    )
+
+
 def _security_profile_card(ticker: str, weight: float | None) -> None:
     st.markdown('<div class="section-label">证券简介（Security Profile）</div>', unsafe_allow_html=True)
     profile = resolve_security_profile(ticker)
@@ -145,12 +172,19 @@ def _security_profile_card(ticker: str, weight: float | None) -> None:
         st.markdown(f'<div class="quiet-card"><b>{ticker}</b><br><small>暂无详细证券介绍</small></div>', unsafe_allow_html=True)
         return
     weight_line = f'<br><br><small>组合占比</small><br><b style="font-size:1.1rem">{weight:.1%}</b>' if weight is not None else ""
+    # Session-cached per ticker (mirrors st.session_state.quotes elsewhere in
+    # this app) so a Streamlit rerun from an unrelated widget never re-fetches
+    # the same ticker's earnings date over the network.
+    cache = st.session_state.setdefault("key_dates_cache", {})
+    if ticker not in cache:
+        cache[ticker] = get_security_key_dates(ticker)
+    key_dates_html = _key_dates_html(cache[ticker])
     st.markdown(
         f'<div class="quiet-card"><b>{profile.title}</b><br>'
         f'<small>代码：{profile.ticker} · 类型：{profile.kind_label}</small><br>'
         f'<small>{profile.category_label}：{profile.category_value}</small><br>'
         f'<small>{profile.subcategory_label}：{profile.subcategory_value}</small><br><br>'
-        f'{profile.description}{weight_line}</div>',
+        f'{profile.description}{weight_line}{key_dates_html}</div>',
         unsafe_allow_html=True,
     )
 

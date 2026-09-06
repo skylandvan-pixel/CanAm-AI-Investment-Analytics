@@ -51,3 +51,37 @@ def test_lookthrough_bars_direct_and_indirect_segments_reflect_weights():
 
 def test_lookthrough_bars_empty_is_empty_string():
     assert ui._lookthrough_bars([]) == ""
+
+
+def test_key_dates_html_empty_is_empty_string():
+    """Step 2A.5: no relevant future events -> the whole subsection is
+    omitted, never an empty heading."""
+    assert ui._key_dates_html([]) == ""
+
+
+def test_key_dates_html_renders_date_title_and_note():
+    from datetime import date
+
+    from core.key_dates import SecurityKeyDate
+
+    events = [
+        SecurityKeyDate(date(2026, 9, 16), "fomc", "美联储 FOMC 利率决议", "confirmed", "关注利率路径", "fomc_reference"),
+        SecurityKeyDate(date(2026, 11, 17), "earnings", "NVDA 下一季度财报", "estimated", "关注集中度", "yfinance"),
+    ]
+    html = ui._key_dates_html(events)
+    assert "关键关注日期" in html
+    assert "2026-09-16" in html and "美联储 FOMC 利率决议" in html and "关注利率路径" in html
+    assert "预计 2026-11-17" in html and "NVDA 下一季度财报" in html and "关注集中度" in html
+
+
+def test_key_dates_html_preserves_order():
+    from datetime import date
+
+    from core.key_dates import SecurityKeyDate
+
+    events = [
+        SecurityKeyDate(date(2026, 9, 16), "fomc", "第一项", "confirmed", "n", "s"),
+        SecurityKeyDate(date(2026, 11, 17), "earnings", "第二项", "estimated", "n", "s"),
+    ]
+    html = ui._key_dates_html(events)
+    assert html.index("第一项") < html.index("第二项")
