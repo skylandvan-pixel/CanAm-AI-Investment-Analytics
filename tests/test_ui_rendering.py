@@ -85,3 +85,27 @@ def test_key_dates_html_preserves_order():
     ]
     html = ui._key_dates_html(events)
     assert html.index("第一项") < html.index("第二项")
+
+
+def test_portfolio_insights_html_empty_is_empty_string():
+    """Step 2A.6: no supportable insight -> the whole block is omitted,
+    never an empty heading."""
+    assert ui._portfolio_insights_html([]) == ""
+
+
+def test_portfolio_insights_html_renders_label_and_text():
+    insights = [
+        {"label": "主要风险", "text": "当前风险主要来自头部持仓集中：NVDA 直接持仓占比约 21.5%。"},
+        {"label": "资产结构", "text": "组合仍以股票资产为主，同时配置了一定比例的债券与现金类资产。"},
+    ]
+    html = ui._portfolio_insights_html(insights)
+    assert "组合洞察（PORTFOLIO INSIGHTS）" in html
+    assert "主要风险" in html and "NVDA 直接持仓占比约 21.5%" in html
+    assert "资产结构" in html and "并非纯股票组合" not in html  # sanity: text is passed through verbatim
+    assert "债券与现金类资产" in html
+
+
+def test_portfolio_insights_html_preserves_order():
+    insights = [{"label": "A标签", "text": "第一条"}, {"label": "B标签", "text": "第二条"}]
+    html = ui._portfolio_insights_html(insights)
+    assert html.index("第一条") < html.index("第二条")

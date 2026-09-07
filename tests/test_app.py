@@ -27,6 +27,52 @@ def test_page1_smoke_shows_chinese_kpis():
     assert "前三大持仓占比" in joined
 
 
+def test_page1_old_low_value_summary_sentence_is_gone():
+    """Step 2A.6: the old "组合以股票（Equity）为主，前三大直接持仓合计 XX%。"
+    sentence must no longer render anywhere on Page 1."""
+    app = _app()
+    assert not app.exception
+    joined = "\n".join(item.value for item in app.markdown)
+    assert "组合以" not in joined
+    assert "直接持仓合计" not in joined
+
+
+def test_page1_shows_portfolio_insights_block():
+    """Step 2A.6: the new 组合洞察（PORTFOLIO INSIGHTS）block replaces the old
+    summary sentence, appearing after Asset Allocation, with at most 2 short
+    insights built entirely from deterministic Layer 1 data (the demo
+    portfolio's real NVDA concentration + asset-allocation structure)."""
+    app = _app()
+    assert not app.exception
+    joined = "\n".join(item.value for item in app.markdown)
+    assert "组合洞察（PORTFOLIO INSIGHTS）" in joined
+    assert "主要风险" in joined and "NVDA" in joined
+    assert "资产结构" in joined
+
+
+def test_page1_portfolio_insights_uses_no_recommendation_language():
+    app = _app()
+    assert not app.exception
+    joined = "\n".join(item.value for item in app.markdown)
+    idx = joined.index("组合洞察（PORTFOLIO INSIGHTS）")
+    block = joined[idx:idx + 400]
+    for forbidden in ("应该", "建议", "维持当前配置", "目标比例", "最优配置"):
+        assert forbidden not in block
+
+
+def test_portfolio_insights_selection_requires_no_gemini_or_anthropic_call(monkeypatch):
+    """Step 2A.6: Portfolio Insights is Layer 1 / core product behavior --
+    rendering Page 1 must never touch core.ai."""
+    import core.ai
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("Page 1 rendering must never call run_ai_analysis")
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _forbidden)
+    app = _app()
+    assert not app.exception
+
+
 def test_only_one_analyze_button_exists():
     """P0 regression: there must be exactly one '开始分析' button anywhere
     in the sidebar, not one inside the import panel and another below it."""

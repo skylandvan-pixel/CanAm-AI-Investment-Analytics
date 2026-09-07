@@ -7,6 +7,7 @@ import streamlit as st
 from core.analytics import treemap_rows
 from core.key_dates import get_security_key_dates, format_event_date
 from core.models import AnalyticsResult
+from core.portfolio_insights import build_portfolio_insights
 from core.reference import ASSET_CLASS_LABELS_EN, ASSET_CLASS_LABELS_ZH
 from core.security_profile import resolve_security_profile
 from core.trade_preview import build_trade_impact_preview
@@ -189,6 +190,27 @@ def _security_profile_card(ticker: str, weight: float | None) -> None:
     )
 
 
+def _portfolio_insights_html(insights: list) -> str:
+    """Pure HTML builder for the Step 2A.6 Portfolio Insights block -- takes
+    already-built {"label", "text"} items (see core.portfolio_insights.
+    build_portfolio_insights) and returns "" when there are none, so the
+    caller can omit the whole block cleanly instead of an empty heading.
+    Reuses .plan-step/.member-role/.member-copy (already defined in the CSS
+    above but otherwise unused) for the label-accent + interpretive-text
+    layout -- no new CSS, same low-saturation blue visual system."""
+    if not insights:
+        return ""
+    items = "".join(
+        f'<div class="plan-step"><div class="member-role">{item["label"]}</div>'
+        f'<div class="member-copy">{item["text"]}</div></div>'
+        for item in insights
+    )
+    return (
+        '<div class="section-label">组合洞察（PORTFOLIO INSIGHTS）</div>'
+        f'<div class="quiet-card">{items}</div>'
+    )
+
+
 def overview(result: AnalyticsResult) -> None:
     metrics = [
         ("投资组合评分（Portfolio Score）", f"{result.portfolio_score:.0f}/100"),
@@ -242,7 +264,9 @@ def overview(result: AnalyticsResult) -> None:
         annotations=[dict(text="资产配置<br>100%", x=0.5, y=0.5, showarrow=False, font=dict(size=14, color="#102A43"))],
     )
     st.plotly_chart(donut, width="stretch", config={"displayModeBar": False}, key="chart_asset_allocation")
-    st.markdown(f'<div class="quiet-card">{result.summary}</div>', unsafe_allow_html=True)
+    insights_html = _portfolio_insights_html(build_portfolio_insights(result))
+    if insights_html:
+        st.markdown(insights_html, unsafe_allow_html=True)
     page_disclaimer()
 
 
