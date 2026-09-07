@@ -1,4 +1,4 @@
-"""Step 2A.5 -- Security Key Dates.
+"""Step 2A.5/2A.7 -- Security Key Dates.
 
 Layer 1, deterministic "what important, already-known future date should the
 user watch for this security" reference for the Page 1 Security Profile
@@ -6,18 +6,28 @@ card. No LLM call anywhere in this module, ever: Gemini/Anthropic must never
 invent, estimate, or infer an event date (see the Step 2A.3/2A.4 report-
 integrity guardrails, which this module never touches or feeds into).
 
-V1 supports exactly two event types, in descending order of reliability:
+V2 (Step 2A.7) supports exactly four event types:
   1. next company earnings date -- individual stocks only, via the existing
      yfinance market-data dependency (core.market already depends on it for
      quotes; no new dependency added here).
   2. next FOMC rate decision -- a small maintained local reference table of
-     published Federal Reserve meeting dates (see _FOMC_DECISION_DATES),
-     never a network call.
+     published Federal Reserve meeting dates (see _FOMC_DECISION_DATES).
+  3. next U.S. CPI release -- a small maintained local reference table of
+     officially published BLS Consumer Price Index release dates (see
+     _CPI_RELEASE_DATES).
+  4. next U.S. Nonfarm Payrolls / Employment Situation release -- a small
+     maintained local reference table of officially published BLS release
+     dates (see _NFP_RELEASE_DATES).
+All three macro tables are local, never a network call and never Gemini-
+generated -- see each table's own comment for its official source.
 
 ETF rebalance/reconstitution dates and a "major earnings window" concept
 were both audited and deliberately deferred: no reliable, already-available
 schedule metadata exists in this project for either, and building one from
-scratch is out of scope for this patch (see the Step 2A.5 report).
+scratch is out of scope for this project (see the Step 2A.5 report). Step
+2A.7 deliberately adds ONLY CPI and NFP to the macro-event pool -- no PCE,
+GDP, retail sales, ISM, jobless claims, Fed speeches, Treasury auctions, or
+generic economic-calendar events (see the Step 2A.7 spec).
 """
 
 from __future__ import annotations
@@ -40,11 +50,11 @@ EventStatus = Literal["confirmed", "estimated", "window"]
 @dataclass(frozen=True)
 class SecurityKeyDate:
     event_date: date
-    event_type: str  # "earnings" | "fomc"
+    event_type: str  # "earnings" | "fomc" | "cpi" | "nfp"
     title_zh: str
     status: EventStatus
     relevance_note: str
-    source_kind: str  # "yfinance" | "fomc_reference"
+    source_kind: str  # "yfinance" | "fomc_reference" | "cpi_reference" | "nfp_reference"
     window_end: date | None = None  # only set when status == "window"
 
 
@@ -66,14 +76,76 @@ _FOMC_DECISION_DATES: tuple[date, ...] = (
     date(2027, 7, 28), date(2027, 9, 15), date(2027, 10, 27), date(2027, 12, 8),
 )
 
+# Officially published U.S. Bureau of Labor Statistics Consumer Price Index
+# release dates -- source: https://www.bls.gov/schedule/news_release/cpi.htm
+# (re-verified directly against the live official schedule table in
+# September 2026; every date below matches that table row for row). The
+# October 2025 report was not published -- per BLS's own official notice at
+# https://www.bls.gov/bls/news-release/cpi.htm: "October 2025 Consumer Price
+# Index -- Not published because of 2025 lapse in federal government
+# appropriations" -- so no CPI release date exists for that reference month
+# and none is included here. A local reference table, never a network call
+# and never Gemini-generated -- extend it before it runs out, from the same
+# official BLS schedule page.
+_CPI_RELEASE_DATES: tuple[date, ...] = (
+    date(2025, 12, 18),
+    date(2026, 1, 13), date(2026, 2, 13), date(2026, 3, 11), date(2026, 4, 10),
+    date(2026, 5, 12), date(2026, 6, 10), date(2026, 7, 14), date(2026, 8, 12),
+    date(2026, 9, 11), date(2026, 10, 14), date(2026, 11, 10), date(2026, 12, 10),
+)
+
+# Officially published U.S. Bureau of Labor Statistics Employment Situation
+# (nonfarm payrolls / NFP) release dates -- source:
+# https://www.bls.gov/schedule/news_release/empsit.htm (re-verified directly
+# against the live official schedule table in September 2026; every date
+# below matches that table row for row). The 2025-12-16 entry (November 2025
+# reference month) was specifically re-audited: it is exactly what BLS's own
+# schedule table publishes for that reference month, carries no rescheduling
+# footnote on the BLS page itself, and is consistent with BLS's official
+# notice (https://www.bls.gov/bls/news-release/empsit.htm) that the prior
+# reference month's release ("October 2025 Employment Situation") was "Not
+# published because of 2025 lapse in federal government appropriations" --
+# i.e. 2025-12-16 is the officially published date for November 2025 data,
+# not a heuristic or third-party-inferred value. A local reference table,
+# never a network call and never Gemini-generated -- extend it before it
+# runs out, from the same official BLS schedule page.
+_NFP_RELEASE_DATES: tuple[date, ...] = (
+    date(2025, 12, 16),
+    date(2026, 1, 9), date(2026, 2, 11), date(2026, 3, 6), date(2026, 4, 3),
+    date(2026, 5, 8), date(2026, 6, 5), date(2026, 7, 2), date(2026, 8, 7),
+    date(2026, 9, 4), date(2026, 10, 2), date(2026, 11, 6), date(2026, 12, 4),
+)
+
+
+def _next_official_date(reference_dates: tuple[date, ...], today: date) -> date | None:
+    """Shared lookup for every local official-date reference table (FOMC,
+    CPI, NFP): the nearest date with today <= date <= today + 90 days, or
+    None if the table has no such date -- fail closed, never guessed or
+    extrapolated beyond the officially published schedule."""
+    horizon = today + timedelta(days=_HORIZON_DAYS)
+    upcoming = [d for d in reference_dates if today <= d <= horizon]
+    return min(upcoming) if upcoming else None
+
 
 def next_fomc_decision_date(today: date) -> date | None:
-    """The nearest published FOMC decision date with today <= date <= today
-    + 90 days, or None if the reference table has no such date (fail
-    closed -- never guessed or extrapolated)."""
-    horizon = today + timedelta(days=_HORIZON_DAYS)
-    upcoming = [d for d in _FOMC_DECISION_DATES if today <= d <= horizon]
-    return min(upcoming) if upcoming else None
+    """The nearest published FOMC decision date within the 90-day horizon,
+    or None (fail closed -- never guessed or extrapolated)."""
+    return _next_official_date(_FOMC_DECISION_DATES, today)
+
+
+def next_cpi_release_date(today: date) -> date | None:
+    """The nearest officially published BLS CPI release date within the
+    90-day horizon, or None (fail closed -- never guessed or extrapolated;
+    never a "second Tuesday of the month"-style heuristic)."""
+    return _next_official_date(_CPI_RELEASE_DATES, today)
+
+
+def next_nfp_release_date(today: date) -> date | None:
+    """The nearest officially published BLS Employment Situation (NFP)
+    release date within the 90-day horizon, or None (fail closed -- never
+    guessed or extrapolated; never a "first Friday of the month"-style
+    heuristic)."""
+    return _next_official_date(_NFP_RELEASE_DATES, today)
 
 
 def etf_is_us_market_exposed(category_value: str, subcategory_value: str) -> bool:
@@ -144,7 +216,7 @@ def next_earnings_date(
             return None
         return SecurityKeyDate(
             event_date, "earnings", f"{ticker} 下一季度财报", status,
-            "关注是否改变当前集中度与减仓/持有判断", "yfinance", window_end,
+            "关注业绩与指引是否改变当前持有判断", "yfinance", window_end,
         )
     except Exception:
         # Fail closed: provider error, network failure, unexpected shape --
@@ -152,15 +224,26 @@ def next_earnings_date(
         return None
 
 
+# Step 2A.7: when more than _MAX_EVENTS candidates are eligible, priority
+# decides which ones SURVIVE the cut -- it has no effect on display order
+# (events are always rendered chronologically once selected, see
+# _finalize). A security's own earnings date is the single most decision-
+# relevant fact this module can offer, so it always outranks the three
+# macro releases; among macro releases, FOMC (a policy decision) outranks
+# CPI, which outranks NFP, per the Step 2A.7 spec.
+_EVENT_TYPE_PRIORITY = {"earnings": 0, "fomc": 1, "cpi": 2, "nfp": 3}
+
+
 def _finalize(events: list[SecurityKeyDate], today: date) -> list[SecurityKeyDate]:
-    """The shared sorting/deduplication pipeline (Step 2A.5 spec): drop
-    invalid/past events, drop anything beyond the 90-day horizon,
-    deduplicate same (event_type, date), sort ascending by date, keep at
-    most _MAX_EVENTS. Applied regardless of which event type produced a
-    given entry, so future event types inherit the same guarantees."""
+    """The shared sorting/deduplication/selection pipeline: drop invalid/
+    past events, drop anything beyond the 90-day horizon, deduplicate same
+    (event_type, date), then SELECT the top _EVENT_TYPE_PRIORITY-ranked
+    events up to _MAX_EVENTS, and finally sort just that selection
+    chronologically for display. Priority governs only which events survive
+    the cut, never the rendered order -- see _EVENT_TYPE_PRIORITY."""
     horizon = today + timedelta(days=_HORIZON_DAYS)
     seen: set[tuple[str, date]] = set()
-    kept: list[SecurityKeyDate] = []
+    valid: list[SecurityKeyDate] = []
     for event in events:
         if not (today <= event.event_date <= horizon):
             continue
@@ -168,9 +251,11 @@ def _finalize(events: list[SecurityKeyDate], today: date) -> list[SecurityKeyDat
         if key in seen:
             continue
         seen.add(key)
-        kept.append(event)
-    kept.sort(key=lambda e: e.event_date)
-    return kept[:_MAX_EVENTS]
+        valid.append(event)
+    valid.sort(key=lambda e: _EVENT_TYPE_PRIORITY.get(e.event_type, 99))
+    selected = valid[:_MAX_EVENTS]
+    selected.sort(key=lambda e: e.event_date)
+    return selected
 
 
 def get_security_key_dates(
@@ -178,15 +263,19 @@ def get_security_key_dates(
     fetch_calendar: Callable[[str], dict] | None = None,
 ) -> list[SecurityKeyDate]:
     """The single entry point the UI calls (Page 1 Security Profile card).
-    Deterministic and network-light: FOMC is a pure local table lookup;
-    earnings (individual stocks only) makes at most one yfinance call. Never
-    calls Gemini/Anthropic in any way, and never requires Pro/Beta unlock.
+    Deterministic and network-light: FOMC/CPI/NFP are pure local table
+    lookups; earnings (individual stocks only) makes at most one yfinance
+    call. Never calls Gemini/Anthropic in any way, and never requires
+    Pro/Beta unlock.
 
-    Relevance rules (Step 2A.5 spec): an individual stock gets its own
-    earnings date plus FOMC (the current Security Profile snapshot is
-    entirely U.S.-listed large caps); an ETF gets FOMC only when
-    etf_is_us_market_exposed says so, and never a constituent's earnings
-    date merely because it might be held inside the ETF."""
+    Relevance rules (Step 2A.5, extended by Step 2A.7): an individual stock
+    gets its own earnings date plus all three macro releases (the current
+    Security Profile snapshot is entirely U.S.-listed large caps); an ETF
+    gets the three macro releases only when etf_is_us_market_exposed says
+    so, and never a constituent's earnings date merely because it might be
+    held inside the ETF. FOMC/CPI/NFP always share the same relevance gate
+    -- Step 2A.7 deliberately reuses the existing U.S.-market-exposure rule
+    rather than inventing a separate one per macro release."""
     today = today or date.today()
     profile = resolve_security_profile(ticker)
     if profile is None:
@@ -197,15 +286,27 @@ def get_security_key_dates(
         earnings = next_earnings_date(ticker, today=today, fetch_calendar=fetch_calendar)
         if earnings is not None:
             events.append(earnings)
-        fomc_relevant = True
+        macro_relevant = True
     else:
-        fomc_relevant = etf_is_us_market_exposed(profile.category_value, profile.subcategory_value)
-    if fomc_relevant:
+        macro_relevant = etf_is_us_market_exposed(profile.category_value, profile.subcategory_value)
+    if macro_relevant:
         fomc_date = next_fomc_decision_date(today)
         if fomc_date is not None:
             events.append(SecurityKeyDate(
                 fomc_date, "fomc", "美联储 FOMC 利率决议", "confirmed",
                 "关注利率路径对相关资产估值的影响", "fomc_reference",
+            ))
+        cpi_date = next_cpi_release_date(today)
+        if cpi_date is not None:
+            events.append(SecurityKeyDate(
+                cpi_date, "cpi", "美国 CPI 通胀数据", "confirmed",
+                "关注通胀变化对利率预期与资产估值的影响", "cpi_reference",
+            ))
+        nfp_date = next_nfp_release_date(today)
+        if nfp_date is not None:
+            events.append(SecurityKeyDate(
+                nfp_date, "nfp", "美国非农就业报告", "confirmed",
+                "关注就业变化对货币政策预期的影响", "nfp_reference",
             ))
     return _finalize(events, today)
 

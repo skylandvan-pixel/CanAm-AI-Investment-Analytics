@@ -1,10 +1,10 @@
-"""Step 2A.5 -- Security Key Dates.
+"""Step 2A.5/2A.7 -- Security Key Dates.
 
 Layer 1, deterministic and network-free by construction wherever possible:
-FOMC is a pure local table lookup (no mocking needed); earnings uses a
-dependency-injected fetch_calendar so these tests never make a live network
-call and never depend on the real world's earnings calendar drifting over
-time.
+FOMC/CPI/NFP are pure local table lookups (no mocking needed); earnings uses
+a dependency-injected fetch_calendar so these tests never make a live
+network call and never depend on the real world's earnings calendar
+drifting over time.
 """
 
 from __future__ import annotations
@@ -18,8 +18,10 @@ from core.key_dates import (
     etf_is_us_market_exposed,
     format_event_date,
     get_security_key_dates,
+    next_cpi_release_date,
     next_earnings_date,
     next_fomc_decision_date,
+    next_nfp_release_date,
 )
 
 TODAY = date(2026, 9, 6)
@@ -36,13 +38,16 @@ def test_no_events_beyond_90_days():
 
 
 def test_nearest_event_first():
-    """NVDA's next FOMC (2026-09-16) is nearer than its injected earnings
-    date (2026-11-17) -- the FOMC entry must come first."""
+    """Step 2A.7: NVDA with an injected earnings date has 4 eligible
+    candidates (NFP 9/4, CPI 9/11, FOMC 9/16, earnings 11/17) -- priority
+    (earnings > FOMC > CPI > NFP) selects earnings+FOMC+CPI and drops NFP,
+    then the selected set is rendered chronologically (CPI, FOMC, earnings)
+    -- never in priority order."""
     events = get_security_key_dates(
         "NVDA", today=TODAY,
         fetch_calendar=lambda t: {"Earnings Date": [date(2026, 11, 17)]},
     )
-    assert [e.event_type for e in events] == ["fomc", "earnings"]
+    assert [e.event_type for e in events] == ["cpi", "fomc", "earnings"]
     dates = [e.event_date for e in events]
     assert dates == sorted(dates)
 
@@ -129,12 +134,16 @@ def test_canadian_fixed_income_etf_excluded_from_fomc():
 # --- SPMO ------------------------------------------------------------------------
 
 def test_spmo_shows_fomc_no_arbitrary_constituent_earnings():
+    """Step 2A.7: SPMO (a U.S. equity ETF) is macro-relevant and gets all
+    three eligible macro releases (FOMC/CPI/NFP) -- but the earnings
+    fetch_calendar callable must never even be invoked for it."""
     events = get_security_key_dates(
         "SPMO", today=TODAY,
         fetch_calendar=lambda t: pytest.fail("SPMO must never trigger an earnings fetch"),
     )
-    assert len(events) == 1
-    assert events[0].event_type == "fomc"
+    assert len(events) == 3
+    assert {e.event_type for e in events} == {"fomc", "cpi", "nfp"}
+    assert "earnings" not in {e.event_type for e in events}
 
 
 # --- Provider failure --------------------------------------------------------
@@ -256,3 +265,179 @@ def test_alternative_asset_etf_is_not_market_exposed():
 
 def test_unknown_ticker_returns_no_events():
     assert get_security_key_dates("ZZZZ", today=TODAY) == []
+
+
+# ============================================================================
+# Step 2A.7 -- Key Dates V2: CPI + NFP
+#
+# Adds exactly two new macro event families (U.S. CPI, U.S. Nonfarm
+# Payrolls), both sourced from small local reference tables of officially
+# published BLS release dates -- no network dependency, no heuristic
+# ("first Friday", "second Tuesday") date generation. FOMC/earnings V1
+# behavior and semantics are otherwise unchanged; the only structural change
+# is that _finalize now selects which events survive a >3-candidate set by
+# priority (earnings > FOMC > CPI > NFP) before sorting the survivors
+# chronologically for display.
+# ============================================================================
+
+# --- CPI / NFP official-date lookups --------------------------------------------
+
+def test_cpi_official_date_included_when_inside_90_day_horizon():
+    assert next_cpi_release_date(TODAY) == date(2026, 9, 11)
+
+
+def test_nfp_official_date_included_when_inside_90_day_horizon():
+    assert next_nfp_release_date(TODAY) == date(2026, 10, 2)
+
+
+def test_cpi_date_outside_90_day_horizon_excluded():
+    far_future = date(2030, 1, 1)
+    assert next_cpi_release_date(far_future) is None
+
+
+def test_nfp_date_outside_90_day_horizon_excluded():
+    far_future = date(2030, 1, 1)
+    assert next_nfp_release_date(far_future) is None
+
+
+def test_past_cpi_date_excluded():
+    """A CPI date strictly before `today` must never be selected as "next"."""
+    day_after_september_cpi = date(2026, 9, 12)  # the day after 2026-09-11
+    assert next_cpi_release_date(day_after_september_cpi) != date(2026, 9, 11)
+    assert next_cpi_release_date(day_after_september_cpi) == date(2026, 10, 14)
+
+
+def test_past_nfp_date_excluded():
+    day_after_september_nfp = date(2026, 9, 5)  # the day after 2026-09-04
+    assert next_nfp_release_date(day_after_september_nfp) != date(2026, 9, 4)
+    assert next_nfp_release_date(day_after_september_nfp) == date(2026, 10, 2)
+
+
+def test_no_heuristic_generated_cpi_or_nfp_dates():
+    """Every CPI/NFP date this module can ever return must come from the
+    local official-date tables, never a "first Friday"/"second Tuesday"-
+    style calendar rule. Probes a full year of "today" values and asserts
+    every non-None result is a literal member of the reference tables."""
+    from core.key_dates import _CPI_RELEASE_DATES, _NFP_RELEASE_DATES
+    from datetime import timedelta
+
+    probe_start = date(2025, 10, 1)
+    for offset in range(0, 365, 7):
+        probe_day = probe_start + timedelta(days=offset)
+        cpi = next_cpi_release_date(probe_day)
+        if cpi is not None:
+            assert cpi in _CPI_RELEASE_DATES
+        nfp = next_nfp_release_date(probe_day)
+        if nfp is not None:
+            assert nfp in _NFP_RELEASE_DATES
+
+
+def test_cpi_and_nfp_events_marked_confirmed(quote_factory):
+    events = get_security_key_dates("SGOV", today=TODAY)
+    cpi = next(e for e in events if e.event_type == "cpi")
+    nfp = next((e for e in events if e.event_type == "nfp"), None)
+    assert cpi.status == "confirmed"
+    assert "预计" not in format_event_date(cpi)
+    if nfp is not None:
+        assert nfp.status == "confirmed"
+
+
+def test_no_duplicate_macro_events(quote_factory):
+    events = get_security_key_dates("SGOV", today=TODAY)
+    keys = [(e.event_type, e.event_date) for e in events]
+    assert len(keys) == len(set(keys))
+
+
+# --- Selection priority: earnings > FOMC > CPI > NFP ----------------------------
+
+def test_selection_priority_earnings_beats_all_macro_events():
+    """When 4 candidates are eligible (earnings + FOMC + CPI + NFP all
+    within the horizon), earnings must survive the max-3 cut."""
+    today = date(2026, 8, 20)  # NFP 9/4, CPI 9/11, FOMC 9/16, earnings 11/18 all in [today, today+90]
+    events = get_security_key_dates(
+        "NVDA", today=today, fetch_calendar=lambda t: {"Earnings Date": [date(2026, 11, 18)]},
+    )
+    assert len(events) == 3
+    assert {e.event_type for e in events} == {"earnings", "fomc", "cpi"}
+    assert "nfp" not in {e.event_type for e in events}
+
+
+def test_selection_priority_fomc_beats_cpi_and_nfp():
+    """A U.S. equity ETF with no earnings and all 3 macro events eligible
+    keeps exactly FOMC + CPI + NFP (only 3 candidates, nothing to drop) --
+    confirms FOMC is never itself dropped in favor of CPI/NFP."""
+    today = date(2026, 8, 20)
+    events = get_security_key_dates("SPMO", today=today)
+    assert {e.event_type for e in events} == {"fomc", "cpi", "nfp"}
+
+
+def test_final_rendering_is_chronological_not_priority_order():
+    """The task's own worked example: selected events (earnings, FOMC, CPI)
+    must render in chronological order (CPI 9/11 < FOMC 9/16 < earnings
+    11/18), never in priority order (earnings, FOMC, CPI)."""
+    today = date(2026, 8, 20)
+    events = get_security_key_dates(
+        "NVDA", today=today, fetch_calendar=lambda t: {"Earnings Date": [date(2026, 11, 18)]},
+    )
+    assert [e.event_type for e in events] == ["cpi", "fomc", "earnings"]
+    assert [e.event_date for e in events] == sorted(e.event_date for e in events)
+
+
+# --- Security relevance with the expanded macro pool ----------------------------
+
+def test_individual_us_stock_receives_earnings_and_all_macro_events():
+    today = date(2026, 8, 20)
+    events = get_security_key_dates(
+        "META", today=today, fetch_calendar=lambda t: {"Earnings Date": [date(2026, 10, 28)]},
+    )
+    types = {e.event_type for e in events}
+    assert "earnings" in types
+    assert types & {"fomc", "cpi", "nfp"}  # at least one macro event also present
+
+
+def test_us_equity_etf_receives_macro_events_but_no_constituent_earnings():
+    events = get_security_key_dates("VHT", today=TODAY, fetch_calendar=lambda t: pytest.fail("no earnings fetch for an ETF"))
+    assert len(events) > 0
+    assert all(e.event_type in {"fomc", "cpi", "nfp"} for e in events)
+
+
+def test_sgov_receives_all_three_macro_event_types_when_in_horizon():
+    today = date(2026, 8, 20)  # all 3 macro dates fall within [today, today+90]
+    events = get_security_key_dates("SGOV", today=today)
+    assert {e.event_type for e in events} == {"fomc", "cpi", "nfp"}
+
+
+def test_canadian_etf_receives_no_us_constituent_earnings_or_macro_events():
+    events = get_security_key_dates("VDY", today=TODAY, fetch_calendar=lambda t: pytest.fail("no earnings fetch for an ETF"))
+    assert events == []
+
+
+# --- Empty-safe / schema-safety regressions --------------------------------------
+
+def test_key_dates_module_has_no_llm_or_gemini_dependency():
+    """Layer 1 must stay LLM-free: no import of core.ai or any LLM SDK."""
+    import ast
+    from pathlib import Path
+
+    module_path = Path(__file__).resolve().parents[1] / "core" / "key_dates.py"
+    tree = ast.parse(module_path.read_text())
+    modules = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    assert not any(m == "core.ai" or m.startswith("core.ai.") for m in modules)
+    assert not any("google" in m or "anthropic" in m for m in modules)
+
+
+def test_committee_result_schema_unchanged_by_key_dates_v2():
+    """Step 2A.7 is a Page 1 / Layer 1 feature only -- it must never touch
+    the Gemini-facing CommitteeResult schema."""
+    import json
+
+    from core.ai import CommitteeResult
+
+    schema = CommitteeResult.model_json_schema()
+    assert len(json.dumps(schema, ensure_ascii=False).encode("utf-8")) == 4088
+    assert len(schema.get("$defs", {})) == 4
