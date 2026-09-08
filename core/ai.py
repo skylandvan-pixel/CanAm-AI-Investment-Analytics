@@ -342,12 +342,14 @@ _NEGATION_MARKERS = (
 _NEGATION_WINDOW_CHARS = 10
 
 
-def _unnegated_overconfident_phrase(text: str) -> str | None:
-    """Returns the first forbidden phrase in `text` that is NOT immediately
-    preceded (within _NEGATION_WINDOW_CHARS) by a negation/hedging marker, or
-    None if every occurrence is negated (or there are none). Narrow substring
-    logic, not general Chinese NLP -- see _OVERCONFIDENT_SAFETY_PHRASES."""
-    for phrase in _OVERCONFIDENT_SAFETY_PHRASES:
+def _first_unnegated_phrase(text: str, phrases: tuple[str, ...]) -> str | None:
+    """Returns the first phrase from `phrases` present in `text` that is NOT
+    immediately preceded (within _NEGATION_WINDOW_CHARS) by a negation/
+    hedging marker, or None if every occurrence is negated (or there are
+    none). Narrow substring logic, not general Chinese NLP. Shared by
+    _unnegated_overconfident_phrase (Step 2A.3) and
+    _validate_semantic_overreach_language (Step 2A.8)."""
+    for phrase in phrases:
         start = 0
         while (idx := text.find(phrase, start)) != -1:
             window = text[max(0, idx - _NEGATION_WINDOW_CHARS):idx]
@@ -355,6 +357,14 @@ def _unnegated_overconfident_phrase(text: str) -> str | None:
                 return phrase
             start = idx + 1
     return None
+
+
+def _unnegated_overconfident_phrase(text: str) -> str | None:
+    """Returns the first forbidden phrase in `text` that is NOT immediately
+    preceded (within _NEGATION_WINDOW_CHARS) by a negation/hedging marker, or
+    None if every occurrence is negated (or there are none). Narrow substring
+    logic, not general Chinese NLP -- see _OVERCONFIDENT_SAFETY_PHRASES."""
+    return _first_unnegated_phrase(text, _OVERCONFIDENT_SAFETY_PHRASES)
 
 
 def _lookthrough_uncertainty_is_material(packet: dict) -> bool:
@@ -421,6 +431,79 @@ def _validate_risk_confidence_language(committee: CommitteeResult, packet: dict)
                 f"{label} made an overconfident safety claim {phrase!r} despite materially incomplete "
                 "look-through coverage"
             )
+
+
+# ============================================================================
+# Step 2A.8 -- final semantic-overreach guardrails. Three production-review
+# findings, none conditioned on look-through coverage (unlike the P0-1/P0-2
+# guardrail above) -- this app has no target-allocation optimizer, no
+# correlation model, and no post-trade destination simulation, so these
+# phrase families are unsupported by any Layer 1 data this product computes,
+# always, regardless of coverage. Same narrow literal-phrase-plus-negation
+# approach as _OVERCONFIDENT_SAFETY_PHRASES above, not a broad classifier.
+# ============================================================================
+
+# A1: a current allocation FACT (current SGOV/VOO/AAPL/other weight) promoted
+# into a "maintain current allocation" recommendation with no independent
+# target-allocation optimizer behind it.
+_MAINTAIN_ALLOCATION_PHRASES = (
+    "维持整体资产配置框架", "保持整体框架稳定", "维持整体配置框架", "整体配置维持不变",
+    "配置框架保持不变", "整体框架保持不变", "暂维持不变", "维持现有配置框架", "维持现有比例",
+    "现有配置最优", "当前配置最优", "当前配置为理想平衡", "理想平衡", "防御性基石", "稳定基石",
+    # Live Gemini regression (Step 2A.8 acceptance run against the concentrated
+    # VOO/NVDA/SGOV/AAPL/XLK demo portfolio): the same "keep current framework"
+    # overreach resurfaced as "保留" (retain) rather than "维持"/"保持".
+    "保留核心资产配置框架", "保留整体资产配置框架", "保留现有配置框架", "保留整体配置框架",
+)
+
+# A2: any correlation claim about a holding/destination -- low, negative, OR
+# high/positive -- with no correlation model in this product to verify any
+# of them. Includes "高相关性"/"高相关"/"正相关" (a live Gemini regression:
+# "切勿将卖出所得直接再投资于其他高相关性科技资产" asserts an unverified HIGH
+# correlation just as ungrounded as the LOW-correlation destination claim the
+# task calls out -- the root cause ("no correlation model exists") applies
+# either direction).
+_CORRELATION_CLAIM_PHRASES = (
+    "低相关性资产", "低相关资产", "负相关资产", "相关性较低", "低相关配置", "通过低相关",
+    "高相关性", "高相关资产", "正相关资产",
+)
+
+# A3: a direct reinvestment-destination recommendation with no deterministic
+# post-trade destination simulation to support it -- includes the prior
+# Step-1 "allowed" replacement phrase, which Step 2A.8 now retires because it
+# still implied a verified concentration-reducing destination.
+_DESTINATION_RECOMMENDATION_PHRASES = (
+    "转向经穿透验证后确认能够降低集中度的资产", "将资金转向", "资金转向", "将资金重新投入", "优先配置某类资产",
+)
+
+# Additional Part A guardrail: no target/optimal Direct Effective N -- it is
+# a descriptive metric only, this product has no target-allocation optimizer
+# computing what Effective N "should" be.
+_TARGET_EFFECTIVE_N_PHRASES = (
+    "提升至更稳健水平", "目标 Effective N", "目标Effective N", "达到合理 Effective N", "达到合理Effective N",
+)
+
+_SEMANTIC_OVERREACH_PHRASE_GROUPS: dict[str, tuple[str, ...]] = {
+    "unsupported maintain-current-allocation claim": _MAINTAIN_ALLOCATION_PHRASES,
+    "unsupported low/negative-correlation claim": _CORRELATION_CLAIM_PHRASES,
+    "unsupported reinvestment-destination recommendation": _DESTINATION_RECOMMENDATION_PHRASES,
+    "unsupported target Direct Effective N claim": _TARGET_EFFECTIVE_N_PHRASES,
+}
+
+
+def _validate_semantic_overreach_language(committee: CommitteeResult) -> None:
+    """Fail-closed guardrail for Step 2A.8: none of these four phrase
+    families are ever supported by this product's current Layer 1 data (no
+    target-allocation optimizer, no correlation model, no post-trade
+    destination simulation) -- unlike _validate_risk_confidence_language,
+    this always runs, regardless of look-through coverage. A negated use
+    (e.g. "不应将资金转向...") is the correct, required framing and is never
+    rejected -- see _first_unnegated_phrase."""
+    for label, text in _narrative_strings(committee):
+        for category, phrases in _SEMANTIC_OVERREACH_PHRASE_GROUPS.items():
+            phrase = _first_unnegated_phrase(text, phrases)
+            if phrase:
+                raise ValueError(f"{label} contains a {category}: {phrase!r}")
 
 
 class TextProvider(Protocol):
@@ -647,7 +730,10 @@ other's label. If lookthrough_coverage is "partial"/"insufficient" or lookthroug
 any look-through Effective N statement the same way top_true_exposures figures are qualified below (a
 limited-coverage figure, never a complete diversification measure). Never compute, name, or imply any
 additional "factor-adjusted" or correlation-adjusted Effective N -- only the two Effective N figures already
-in the packet exist.
+in the packet exist. Direct Effective N is a purely descriptive metric -- this product has no target-
+allocation optimizer computing what Effective N "should" be, so never set or imply a target/optimal Direct
+Effective N (never "提升至更稳健水平"/"目标 Effective N"/"达到合理 Effective N"). You may only say it can be
+observed going forward, e.g. "后续可观察 Direct Effective N 是否改善。"
 
 Coverage-aware look-through wording -- applies to every field below, not only action_plan: each
 top_true_exposures entry is built only from named ETF constituents already known to this packet; any ETF
@@ -715,12 +801,21 @@ risk_flags instead, and let the incomplete look-through figure only add color/ca
 action is ever allowed under incomplete coverage -- if the direct data alone already shows meaningful
 concentration, a risk-management action grounded in that direct data is still appropriate.
 
-Fund-destination rule: never claim that moving proceeds from a reduced holding into another named ETF or
-fund meaningfully lowers that stock's or sector's concentration unless this packet's own asset_allocation or
-top_true_exposures data already supports that specific destination's effect. If the destination's
-look-through effect cannot be verified from this packet, do not name a specific replacement security (e.g.
-never "核心宽基ETF（如VOO）"/"如SGOV" as a concentration-reducing destination) -- use general wording such as
-"转向经穿透验证后确认能够降低集中度的资产" instead of naming a broad ETF by ticker.
+Fund-destination rule (Step 2A.8): this product has no correlation model and no deterministic post-trade
+destination simulation, so it can verify neither which asset is "low correlation" to the rest of the
+portfolio nor which specific destination would actually reduce concentration after the trade. Never claim a
+destination asset is "低相关性资产"/"负相关资产"/"相关性较低", and equally never claim it is "高相关性"/"正相关"
+either (the same lack of a correlation model makes a HIGH-correlation caution just as unverifiable as a
+LOW-correlation recommendation) -- use "未经穿透验证" instead of any correlation-direction word when cautioning
+against a reinvestment destination. Never recommend moving reduce-action
+proceeds into any destination, whether named by ticker (e.g. never "核心宽基ETF（如VOO）"/"如SGOV") or only by
+general type (e.g. never "转向经穿透验证后确认能够降低集中度的资产"/"优先配置某类资产"/"将资金转向"/"将资金重新
+投入VOO/SGOV/SPMO") -- this app has no data proving any specific or general destination actually reduces
+concentration. Treat sale proceeds from any REDUCE-type action as hypothetical cash with no reinvestment
+assumption, matching the local Trade Impact Preview -- e.g. "卖出所得暂存为现金，不预设再投资标的。" If
+reinvestment is worth mentioning at all, limit it to a concentration-only verification step using only this
+packet's own asset_allocation/top_true_exposures data, e.g. "再投资前，应验证候选资产在穿透后不会继续增加现有
+集中度" / "后续再投资需单独评估。"
 
 Current-fact-vs-target rule: any current observed value already in this packet -- current cash weight, a
 current holding/ETF/sector/asset-class weight, etc. -- is a FACT about today's portfolio, never automatically
@@ -731,7 +826,13 @@ that level is appropriate given the packet's other facts (risk_flags, concentrat
 then, label it explicitly as your own recommendation ("建议"/"AI建议"), never as if the packet itself defined
 that target. Never restate a current percentage as "建议保持在该比例左右" merely because it happens to already
 be the current value with no additional justification -- this applies to cash specifically and to every other
-current weight in the packet.
+current weight in the packet. This product also has no target-allocation optimizer proving the current overall
+allocation (across VOO/SGOV/AAPL/or any other holding) is optimal or should be maintained -- never phrase a
+current allocation as "维持整体资产配置框架"/"保持整体框架稳定"/"保留核心资产配置框架"/"当前配置为理想平衡"/
+"防御性基石"/"稳定基石"/"现有配置最优" ("保留"/"维持"/"保持" a current framework are all the same claim). When
+no holding besides an already-flagged one needs attention this round, say so without a
+maintain-current-allocation claim -- e.g. "当前已验证数据未识别出需要优先处理的其他持仓。" or "当前行动重点集中
+在已触发风险警报的持仓。" -- never a blanket "其余核心仓位暂维持不变"/"其余仓位暂维持不变" line.
 
 SGOV / Fixed-Income application of the rule above (Step 2A.4): a current SGOV holding, its current direct
 weight, and the aggregate Fixed Income allocation are all facts this packet may contain -- but CURRENT WEIGHT
@@ -769,7 +870,8 @@ condition; prefer "暂不追加"/"维持"/"反弹时分阶段减仓"/"回调后�
   5-action maximum just to fill it. A holding that needs no real decision (already appropriately sized, no
   new information) does not need its own entry -- e.g. never manufacture an SGOV or other Fixed-Income HOLD
   card merely because that holding exists; fold it into the checklist's closing
-  "其余核心仓位暂维持不变" line instead. Only include a holding that genuinely needs REDUCE/ADD/staged
+  "当前已验证数据未识别出需要优先处理的其他持仓" line instead (never "其余核心仓位暂维持不变" -- see the
+  Current-fact-vs-target rule above). Only include a holding that genuinely needs REDUCE/ADD/staged
   execution/explicit restraint/important review. If NO holding genuinely needs one of those, return
   security_actions as an EMPTY list -- an empty list is valid and preferred over a manufactured entry. Never
   fabricate a HOLD, WAIT, "maintain current weight," or "no rebalance necessary" entry merely to make this
@@ -830,7 +932,8 @@ condition; prefer "暂不追加"/"维持"/"反弹时分阶段减仓"/"回调后�
   MUST be tickers already listed above. reassess is one concise line on what to reconsider.
 - checklist: 3-6 concise, non-repetitive investor tasks compressing the whole plan into executable steps
   (never a system/data-maintenance task); if most holdings need no action, end with one compact line such as
-  "其余仓位暂维持不变" instead of listing them individually.
+  "当前已验证数据未识别出需要优先处理的其他持仓" or "当前行动重点集中在已触发风险警报的持仓" instead of listing
+  them individually (never "其余仓位暂维持不变" -- see the Current-fact-vs-target rule above).
 If account_type is Taxable, mention the resulting tax friction (staged selling, checking cost basis before
 realizing gains) in at most two places total across committee members + action_plan combined -- typically
 once where it materially shapes the chairman's decision or a specific security_action, and at most one
@@ -886,6 +989,7 @@ def run_ai_analysis(
         _validate_action_plan_limits(parsed.action_plan)
         _validate_action_plan_quality(parsed.action_plan)
         _validate_risk_confidence_language(parsed, packet)
+        _validate_semantic_overreach_language(parsed)
     except (ValidationError, ValueError) as exc:
         _log_ai_failure(
             exc, provider=provider.name, model=provider.model, stage="response_parse",

@@ -825,14 +825,17 @@ def test_prompt_distinguishes_ai_target_from_deterministic_fact():
 
 def test_prompt_includes_fund_destination_guardrail():
     """Section 10 (Step 1); strengthened with explicit named-ticker examples
-    in Step 2A.2: never claim an unverified destination reduces
-    concentration; prefer generic wording over naming an unverified ETF
-    such as VOO/SGOV."""
+    in Step 2A.2. Step 2A.8 retires the prior "use general wording instead"
+    escape hatch entirely -- with no correlation model and no post-trade
+    destination simulation, NO destination (named ticker or generic type) is
+    ever recommended; proceeds default to hypothetical cash instead."""
     from core.ai import _prompt
 
     text = _prompt({})
-    assert "转向经穿透验证后确认能够降低集中度的资产" in text
+    assert "转向经穿透验证后确认能够降低集中度的资产" in text  # named as a forbidden example, not a recommendation
     assert "VOO" in text and "SGOV" in text  # named as forbidden examples, not recommendations
+    assert "卖出所得暂存为现金，不预设再投资标的" in text
+    assert "低相关性资产" in text  # named as forbidden -- no correlation model exists
 
 
 def test_prompt_forbids_complete_lookthrough_coverage_claims():
@@ -878,12 +881,17 @@ def test_prompt_forbids_tax_lot_sequencing_claims():
 
 
 def test_prompt_prefers_fewer_security_actions():
-    """Section 6: "less but meaningful" -- prefer 1-3 over padding to 5."""
+    """Section 6: "less but meaningful" -- prefer 1-3 over padding to 5.
+    Step 2A.8: the closing filler line for untouched holdings must no
+    longer claim they are being "maintained" (an unsupported target-
+    allocation claim) -- it must say no other holding was identified as
+    needing priority action instead."""
     from core.ai import _prompt
 
     text = _prompt({})
     assert "1-3" in text
-    assert "其余核心仓位暂维持不变" in text
+    assert "当前已验证数据未识别出需要优先处理的其他持仓" in text
+    assert "其余核心仓位暂维持不变" in text  # named explicitly as the forbidden example, not a recommendation
 
 
 def test_prompt_limits_tax_mention_repetition():
@@ -2604,6 +2612,239 @@ def test_concentration_packet_keeps_direct_and_lookthrough_effective_n_as_distin
     assert "direct_effective_n" in packet["concentration"]
     assert "lookthrough_effective_n" in packet["concentration"]
     assert packet["concentration"]["direct_effective_n"] != packet["concentration"]["lookthrough_effective_n"]
+
+
+# ============================================================================
+# Step 2A.8 -- Final Semantic Hardening (Part A)
+#
+# Three production-review findings, none conditioned on look-through
+# coverage (unlike Step 2A.3's P0-1/P0-2 guardrail): (A1) a current
+# allocation FACT (current SGOV/VOO/AAPL/other weight) promoted into a
+# "maintain current allocation" recommendation with no target-allocation
+# optimizer behind it; (A2) a destination asset claimed as "low correlation"
+# with no correlation model; (A3) a direct reinvestment-destination
+# recommendation with no post-trade destination simulation. Plus one
+# additional guardrail: no target/optimal Direct Effective N. See
+# core.ai._validate_semantic_overreach_language for the one new fail-closed
+# validator this step adds; everything else is prompt-only.
+# ============================================================================
+
+def test_validate_semantic_overreach_fails_closed_on_maintain_allocation_claim():
+    """A1: a current-allocation fact must never become a blanket
+    "maintain current allocation" recommendation."""
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(_committee(majority_view="维持整体资产配置框架，保持整体框架稳定。"))
+    with pytest.raises(ValueError, match="maintain-current-allocation"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_retain_framework_wording_variant():
+    """Live production regression (Step 2A.8 manual acceptance run against
+    the concentrated VOO/NVDA/SGOV/AAPL/XLK demo portfolio): a real Gemini
+    response phrased the same "keep current framework" overreach as
+    "保留核心资产配置框架" (retain) rather than "维持"/"保持" -- must fail
+    closed the same way."""
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(
+        _committee(chairman_decision="决定在保留核心资产配置框架的同时，针对已触发集中度警报的 NVDA 启动主动风险管控。")
+    )
+    with pytest.raises(ValueError, match="maintain-current-allocation"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_generic_keep_unchanged_filler():
+    """A1: the retired "其余核心仓位暂维持不变" closing-line filler (which named
+    VOO/SGOV/AAPL as examples in the production regression) must fail
+    closed wherever it appears, e.g. in the checklist."""
+    from core.ai import _validate_semantic_overreach_language
+
+    payload = _committee()
+    payload["action_plan"]["checklist"] = ["复核NVDA仓位", "其余核心仓位（如VOO、SGOV、AAPL）暂维持不变"]
+    committee = CommitteeResult.model_validate(payload)
+    with pytest.raises(ValueError, match="maintain-current-allocation"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_sgov_current_weight_as_target():
+    """A1: current SGOV weight alone must never be promoted into a
+    "current allocation is optimal" / "defensive cornerstone" claim."""
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(_committee(main_concern="当前SGOV配置为理想平衡，属于组合的稳定基石。"))
+    with pytest.raises(ValueError, match="maintain-current-allocation"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_low_correlation_claim():
+    """A2: no correlation model exists -- a destination asset must never be
+    claimed as low/negatively correlated."""
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(
+        _committee(chairman_decision="逐步将再平衡资金引导至低相关性资产，以降低组合风险。")
+    )
+    with pytest.raises(ValueError, match="correlation"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_high_correlation_claim():
+    """Live production regression (Step 2A.8 manual acceptance run): a real
+    Gemini response cautioned against "其他高相关性科技资产" as a reinvestment
+    destination -- an unverified HIGH-correlation claim is just as
+    unsupported as the LOW-correlation claim the task calls out, since no
+    correlation model exists in either direction."""
+    from core.ai import _validate_semantic_overreach_language
+
+    payload = _committee()
+    payload["action_plan"]["do_not_now"] = ["切勿将卖出所得直接再投资于其他高相关性科技资产"]
+    committee = CommitteeResult.model_validate(payload)
+    with pytest.raises(ValueError, match="correlation"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_direct_destination_recommendation():
+    """A3: no post-trade destination simulation exists -- proceeds must
+    never be directed at a specific or generically-typed destination."""
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(
+        _committee(majority_view="优先将资金转向经穿透验证后确认能够降低集中度的资产。")
+    )
+    with pytest.raises(ValueError, match="destination"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_target_effective_n():
+    """Additional Part A guardrail: Direct Effective N is descriptive only
+    -- never a target this product computes or recommends reaching."""
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(
+        _committee(main_concern="建议将直接持仓 Effective N 提升至更稳健水平。")
+    )
+    with pytest.raises(ValueError, match="Effective N"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_allows_negated_phrasing():
+    """A negated use of the same words is the correct, required framing and
+    must never be rejected."""
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(
+        _committee(majority_view="不能将资金转向未经验证的资产，也不代表当前配置最优。")
+    )
+    _validate_semantic_overreach_language(committee)  # must not raise
+
+
+def test_validate_semantic_overreach_allows_concentration_only_verification_wording():
+    """The allowed replacement framing (concentration-only verification,
+    hypothetical cash, no priority holding identified) must pass."""
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(_committee(
+        majority_view="当前已验证数据未识别出需要优先处理的其他持仓。",
+        main_concern="卖出所得暂存为现金，不预设再投资标的；再投资前，应验证候选资产在穿透后不会继续增加现有集中度。",
+    ))
+    _validate_semantic_overreach_language(committee)  # must not raise
+
+
+def test_validate_semantic_overreach_scans_non_chairman_fields_too():
+    """The guardrail is not chairman/majority_view-specific -- any
+    specialist's conclusion making the same claim must also fail closed."""
+    from core.ai import _validate_semantic_overreach_language
+
+    payload = _committee()
+    for member in payload["members"]:
+        if member["role"] == "portfolio":
+            member["conclusion"] = "维持整体配置框架，无需调整。"
+    committee = CommitteeResult.model_validate(payload)
+    with pytest.raises(ValueError, match=r"members\[portfolio\]"):
+        _validate_semantic_overreach_language(committee)
+
+
+# --- Full-path integration tests via run_ai_analysis ------------------------
+
+def test_run_ai_analysis_fails_closed_on_maintain_allocation_production_regression(tmp_path, mixed_result):
+    broken = _committee(chairman_decision="维持整体资产配置框架，保持整体框架稳定，其余核心仓位（如VOO、SGOV）暂维持不变。")
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, provider=FakeProvider(broken), cache_dir=tmp_path)
+
+
+def test_run_ai_analysis_fails_closed_on_low_correlation_production_regression(tmp_path, mixed_result):
+    broken = _committee(chairman_decision="逐步将再平衡资金引导至低相关性资产。")
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, provider=FakeProvider(broken), cache_dir=tmp_path)
+
+
+def test_run_ai_analysis_fails_closed_on_direct_destination_production_regression(tmp_path, mixed_result):
+    broken = _committee(chairman_decision="优先将资金转向经穿透验证后确认能够降低集中度的资产。")
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, provider=FakeProvider(broken), cache_dir=tmp_path)
+
+
+def test_run_ai_analysis_fails_closed_on_target_effective_n_production_regression(tmp_path, mixed_result):
+    broken = _committee(chairman_decision="将直接持仓 Effective N 提升至更稳健水平。")
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(mixed_result, provider=FakeProvider(broken), cache_dir=tmp_path)
+
+
+def test_run_ai_analysis_succeeds_with_allowed_semantic_replacement_wording(tmp_path, mixed_result):
+    """The allowed replacement framing must pass end-to-end: no priority
+    holding identified beyond the flagged one, sale proceeds as
+    hypothetical cash, concentration-only reinvestment verification."""
+    ok = _committee(
+        majority_view="当前已验证数据未识别出需要优先处理的其他持仓。",
+        chairman_decision="卖出所得暂存为现金，不预设再投资标的；后续再投资需单独评估。",
+    )
+    parsed, meta = run_ai_analysis(mixed_result, provider=FakeProvider(ok), cache_dir=tmp_path)
+    assert meta["success"]
+
+
+def test_run_ai_analysis_still_succeeds_with_valid_nvda_reduce_on_rebound(tmp_path, mixed_result):
+    """Regression: the existing valid NVDA REDUCE_ON_REBOUND fixture (VALID)
+    must still pass end-to-end, unaffected by the new Step 2A.8 guardrail."""
+    parsed, meta = run_ai_analysis(mixed_result, provider=FakeProvider(_committee()), cache_dir=tmp_path)
+    assert meta["success"]
+    assert parsed.action_plan.security_actions[0].ticker == "NVDA"
+    assert parsed.action_plan.security_actions[0].action == "REDUCE_ON_REBOUND"
+
+
+def test_run_ai_analysis_still_allows_empty_security_actions_under_new_guardrail(tmp_path, low_confidence_result):
+    """Regression: a genuinely no-action portfolio may still return an
+    empty security_actions list -- the new guardrail must not force a
+    fabricated entry."""
+    plan = _action_plan(security_actions=[])
+    ok = {**VALID, "action_plan": plan}
+    parsed, meta = run_ai_analysis(low_confidence_result, provider=FakeProvider(ok), cache_dir=tmp_path)
+    assert meta["success"]
+    assert parsed.action_plan.security_actions == []
+
+
+def test_trade_impact_preview_still_treats_proceeds_as_hypothetical_cash(mixed_result, quote_factory):
+    """Preserve the Trade Preview rule: sale proceeds become hypothetical
+    cash, never an assumed reinvestment into any destination -- untouched
+    by Step 2A.8 (core.trade_preview itself was not modified; this is a
+    smoke check that the rule this Step 2A.8 report relies on is intact)."""
+    from core.models import HoldingInput
+    from core.trade_preview import build_trade_impact_preview
+
+    holdings = [HoldingInput("NVDA", 20), HoldingInput("VOO", 50), HoldingInput("SGOV", 30)]
+    quotes = quote_factory("NVDA", "VOO", "SGOV")
+    preview = build_trade_impact_preview(
+        holdings=holdings, quotes=quotes, cash=mixed_result.snapshot.cash,
+        account_currency=mixed_result.snapshot.account_currency, usd_cad=1.35,
+        account_type=mixed_result.snapshot.account_type, before_result=mixed_result,
+        ticker="NVDA", action="REDUCE", position_reduction_pct=50.0,
+    )
+    assert preview is not None
+    assert preview.executable_shares > 0
+    # Reduced shares leave the portfolio as cash, never reallocated into
+    # another holding -- NVDA's own direct weight drops and no other
+    # holding's weight is touched by this function at all.
+    assert preview.after_direct_weight < preview.before_direct_weight
 
 
 def test_schema_bytes_match_step_2a_3_approved_baseline():

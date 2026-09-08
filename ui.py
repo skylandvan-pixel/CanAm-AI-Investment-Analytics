@@ -6,6 +6,7 @@ import streamlit as st
 
 from core.analytics import treemap_rows
 from core.key_dates import get_security_key_dates, format_event_date
+from core.market_regime import STATUS_UNAVAILABLE, get_market_regime_snapshot
 from core.models import AnalyticsResult
 from core.portfolio_insights import build_portfolio_insights
 from core.reference import ASSET_CLASS_LABELS_EN, ASSET_CLASS_LABELS_ZH
@@ -37,6 +38,10 @@ def inject_theme() -> None:
     .metric-item { border-left:1px solid #D9E4F2; padding:.2rem 1rem .5rem; min-width:0; }
     .metric-label { color:#40566F; font-size:.82rem; }
     .metric-value { color:#102A43; font-size:2rem; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:.3rem; }
+    .regime-row { display:flex; flex-wrap:wrap; align-items:baseline; gap:.4rem 1.4rem; padding:.55rem 1.2rem; }
+    .regime-badge { color:#102A43; font-weight:700; font-size:.95rem; }
+    .regime-metric { color:#40566F; font-size:.8rem; white-space:nowrap; }
+    .regime-metric b { color:#102A43; }
     .risk-number,.risk-badge { color:#C92A2A; font-weight:750; }
     .member { min-height:126px; }
     .member-role { color:#3B6690; font-size:.76rem; font-weight:700; }
@@ -211,6 +216,38 @@ def _portfolio_insights_html(insights: list) -> str:
     )
 
 
+def _market_regime_snapshot():
+    """Session-cached like key_dates_cache above -- Market Regime depends
+    only on market data, not on the portfolio, so one fetch per Streamlit
+    session is enough and avoids refetching SPY/VIX history on every
+    unrelated rerun."""
+    if "market_regime_snapshot" not in st.session_state:
+        st.session_state["market_regime_snapshot"] = get_market_regime_snapshot()
+    return st.session_state["market_regime_snapshot"]
+
+
+def _market_regime_html(snapshot) -> str:
+    """Pure HTML builder for the compact Step 2A.8 Market Regime module --
+    mirrors _portfolio_insights_html's "" contract so a failed/unavailable
+    snapshot (see core.market_regime.get_market_regime_snapshot's
+    never-raises guarantee) is cleanly omitted from Page 1 rather than
+    shown broken. Deliberately reuses .quiet-card (no new card chrome) with
+    a lean .regime-row layout instead of the KPI row's large 2rem figures --
+    this is descriptive market weather, never an action recommendation, so
+    it must stay visually lighter than the Treemap below it, not heavier."""
+    if snapshot.status == STATUS_UNAVAILABLE:
+        return ""
+    row = (
+        f'<span class="regime-badge">{snapshot.current_regime_label or "—"}</span>'
+        f'<span class="regime-metric">3个月调整风险 <b>{snapshot.correction_risk_3m_display or "—"}</b></span>'
+        f'<span class="regime-metric">6个月熊市风险 <b>{snapshot.bear_risk_6m_display or "—"}</b></span>'
+    )
+    return (
+        '<div class="section-label">市场状态（MARKET REGIME）</div>'
+        f'<div class="quiet-card regime-row">{row}</div>'
+    )
+
+
 def overview(result: AnalyticsResult) -> None:
     metrics = [
         ("投资组合评分（Portfolio Score）", f"{result.portfolio_score:.0f}/100"),
@@ -220,6 +257,9 @@ def overview(result: AnalyticsResult) -> None:
     ]
     items = ''.join(f'<div class="metric-item"><div class="metric-label">{label}</div><div class="metric-value">{value}</div></div>' for label, value in metrics)
     st.markdown('<div class="metric-grid">' + items + '</div>', unsafe_allow_html=True)
+    market_regime_html = _market_regime_html(_market_regime_snapshot())
+    if market_regime_html:
+        st.markdown(market_regime_html, unsafe_allow_html=True)
     st.markdown('<div class="section-label">直接持仓（Direct Holdings）</div>', unsafe_allow_html=True)
     rows = treemap_rows(result)
     frame = pd.DataFrame(rows)

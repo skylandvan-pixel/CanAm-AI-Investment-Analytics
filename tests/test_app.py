@@ -60,6 +60,88 @@ def test_page1_portfolio_insights_uses_no_recommendation_language():
         assert forbidden not in block
 
 
+def _fake_regime_snapshot(status="complete", label="偏多", correction="0-16%", bear="0-10%"):
+    from core.market_regime import MarketRegimeSnapshot
+
+    return MarketRegimeSnapshot(
+        status=status, current_regime="Bull", current_regime_label=label,
+        correction_risk_3m_display=correction, bear_risk_6m_display=bear,
+    )
+
+
+def test_page1_market_regime_appears_between_kpi_and_treemap_header(monkeypatch):
+    """Step 2A.8 placement requirement: KPI cards -> Market Regime ->
+    Direct Holdings Treemap, in that order."""
+    import ui
+
+    monkeypatch.setattr(ui, "get_market_regime_snapshot", lambda *a, **k: _fake_regime_snapshot())
+    app = _app()
+    assert not app.exception
+    values = [item.value for item in app.markdown]
+    kpi_idx = next(i for i, v in enumerate(values) if "metric-grid" in v)
+    regime_idx = next(i for i, v in enumerate(values) if "市场状态（MARKET REGIME）" in v)
+    treemap_idx = next(i for i, v in enumerate(values) if "直接持仓（Direct Holdings）" in v)
+    assert kpi_idx < regime_idx < treemap_idx
+
+
+def test_page1_market_regime_shows_regime_and_risk_ranges(monkeypatch):
+    import ui
+
+    monkeypatch.setattr(ui, "get_market_regime_snapshot", lambda *a, **k: _fake_regime_snapshot())
+    app = _app()
+    assert not app.exception
+    joined = "\n".join(item.value for item in app.markdown)
+    assert "市场状态（MARKET REGIME）" in joined
+    assert "偏多" in joined
+    assert "3个月调整风险" in joined and "0-16%" in joined
+    assert "6个月熊市风险" in joined and "0-10%" in joined
+
+
+def test_page1_renders_normally_without_market_regime_when_unavailable(monkeypatch):
+    """Fail-closed: Market Regime failure must never break Page 1 -- the
+    module is simply omitted, everything else renders unchanged."""
+    import ui
+
+    monkeypatch.setattr(
+        ui, "get_market_regime_snapshot",
+        lambda *a, **k: _fake_regime_snapshot(status="unavailable"),
+    )
+    app = _app()
+    assert not app.exception
+    joined = "\n".join(item.value for item in app.markdown)
+    assert "市场状态（MARKET REGIME）" not in joined
+    assert "投资组合评分" in joined
+    assert "直接持仓（Direct Holdings）" in joined
+
+
+def test_page1_market_regime_requires_no_ai_provider_call(monkeypatch):
+    """Market Regime is Layer 1 / deterministic -- rendering it must never
+    touch core.ai (no Gemini/Anthropic call)."""
+    import core.ai
+    import ui
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("Page 1 rendering must never call run_ai_analysis")
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _forbidden)
+    monkeypatch.setattr(ui, "get_market_regime_snapshot", lambda *a, **k: _fake_regime_snapshot())
+    app = _app()
+    assert not app.exception
+
+
+def test_page1_market_regime_never_shows_buy_sell_recommendation(monkeypatch):
+    import ui
+
+    monkeypatch.setattr(ui, "get_market_regime_snapshot", lambda *a, **k: _fake_regime_snapshot(label="风险升高"))
+    app = _app()
+    assert not app.exception
+    joined = "\n".join(item.value for item in app.markdown)
+    idx = joined.index("市场状态（MARKET REGIME）")
+    block = joined[idx:idx + 400]
+    for forbidden in ("应该卖出股票", "买入", "卖出", "减仓", "加仓"):
+        assert forbidden not in block
+
+
 def test_portfolio_insights_selection_requires_no_gemini_or_anthropic_call(monkeypatch):
     """Step 2A.6: Portfolio Insights is Layer 1 / core product behavior --
     rendering Page 1 must never touch core.ai."""

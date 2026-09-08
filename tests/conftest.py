@@ -6,6 +6,25 @@ from core.analytics import analyze, build_snapshot
 from core.models import HoldingInput, Quote
 
 
+@pytest.fixture(autouse=True)
+def _no_live_market_regime_network_by_default(monkeypatch):
+    """Step 2A.8: ui.overview() fetches live SPY/VIX history for the Market
+    Regime module on every Page 1 render. Without this guard, every
+    AppTest-based test in tests/test_app.py would make a real yfinance
+    network call, making the whole suite slow and network-dependent (the
+    project's existing tests never depend on live network -- AI providers
+    and quotes are always injected/mocked). Defaults every test to a fast,
+    deterministic "unavailable" snapshot (itself exercising the real
+    fail-closed/omit-when-unavailable path); a test that needs specific
+    Market Regime content overrides this with its own
+    monkeypatch.setattr(ui, "get_market_regime_snapshot", ...), which wins
+    since it runs after this fixture within the same test."""
+    import ui
+    from core.market_regime import MarketRegimeSnapshot
+
+    monkeypatch.setattr(ui, "get_market_regime_snapshot", lambda *a, **k: MarketRegimeSnapshot())
+
+
 @pytest.fixture
 def quote_factory():
     def make(*tickers):

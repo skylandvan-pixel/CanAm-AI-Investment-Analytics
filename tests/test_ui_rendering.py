@@ -109,3 +109,48 @@ def test_portfolio_insights_html_preserves_order():
     insights = [{"label": "A标签", "text": "第一条"}, {"label": "B标签", "text": "第二条"}]
     html = ui._portfolio_insights_html(insights)
     assert html.index("第一条") < html.index("第二条")
+
+
+# --- Step 2A.8 Part B: compact Market Regime module -------------------------
+
+class _FakeRegimeSnapshot:
+    def __init__(self, status="complete", current_regime_label="偏多", correction="0-16%", bear="0-10%"):
+        self.status = status
+        self.current_regime_label = current_regime_label
+        self.correction_risk_3m_display = correction
+        self.bear_risk_6m_display = bear
+
+
+def test_market_regime_html_omitted_when_unavailable():
+    """Fail-closed: an unavailable snapshot must be cleanly omitted from
+    Page 1, never rendered as a broken/empty block."""
+    html = ui._market_regime_html(_FakeRegimeSnapshot(status="unavailable"))
+    assert html == ""
+
+
+def test_market_regime_html_renders_regime_and_risk_ranges():
+    html = ui._market_regime_html(_FakeRegimeSnapshot())
+    assert "市场状态（MARKET REGIME）" in html
+    assert "偏多" in html
+    assert "3个月调整风险" in html and "0-16%" in html
+    assert "6个月熊市风险" in html and "0-10%" in html
+
+
+def test_market_regime_html_never_contains_action_wording():
+    """Market Regime describes market weather only -- the rendered block
+    must never contain a buy/sell/reduce-type instruction."""
+    html = ui._market_regime_html(_FakeRegimeSnapshot())
+    for forbidden in ("买入", "卖出", "减仓", "加仓", "应该卖出股票"):
+        assert forbidden not in html
+
+
+def test_market_regime_html_uses_lighter_visual_class_than_kpi_metric_grid():
+    """The module must stay visually lighter than the KPI row's large
+    2rem .metric-value figures -- it reuses .regime-row/.regime-badge, not
+    .metric-grid/.metric-value."""
+    html = ui._market_regime_html(_FakeRegimeSnapshot())
+    assert "metric-value" not in html
+    assert "regime-row" in html and "regime-badge" in html
+
+    for status, label in [("partial", "中性"), ("complete", "风险升高"), ("complete", "防御")]:
+        assert label in ui._market_regime_html(_FakeRegimeSnapshot(status=status, current_regime_label=label))
