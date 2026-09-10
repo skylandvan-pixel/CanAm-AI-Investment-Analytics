@@ -165,3 +165,13 @@ def resolve_security_profile(ticker: str) -> SecurityProfile | None:
             "资产类别", asset_class, "基金类别", fund_category, description,
         )
     return None
+
+
+def stock_name_en(ticker: str) -> str | None:
+    """The canonical English company name for a known stock ticker, from the
+    same _STOCK_PROFILES snapshot resolve_security_profile already uses --
+    never a guessed/inferred name, never a new data source or network
+    lookup. Returns None (fail closed) for any ticker outside the snapshot.
+    Used by core.etf_holdings (Step 2A.11) to label ETF constituent rows."""
+    entry = _STOCK_PROFILES.get((ticker or "").strip().upper())
+    return entry[1] if entry else None

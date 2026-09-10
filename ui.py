@@ -6,6 +6,7 @@ import streamlit as st
 
 from core.analyst_view import get_analyst_view
 from core.analytics import treemap_rows
+from core.etf_holdings import get_etf_top_holdings
 from core.key_dates import get_security_key_dates, format_event_date
 from core.market_regime import STATUS_UNAVAILABLE, get_market_regime_snapshot
 from core.models import AnalyticsResult
@@ -75,6 +76,12 @@ def inject_theme() -> None:
     .analyst-caption { color:#8AA0B8; font-size:.72rem; margin-top:.5rem; }
     .analyst-pct-pos { color:#3B6690; font-weight:700; font-size:.8rem; margin-left:.3rem; }
     .analyst-pct-neg { color:#C92A2A; font-weight:700; font-size:.8rem; margin-left:.3rem; }
+    .holdings-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 1.2rem; margin:.4rem 0; }
+    .holdings-row { display:flex; justify-content:space-between; align-items:baseline; gap:.5rem; font-size:.82rem; padding:.18rem 0; }
+    .holdings-name { color:#102A43; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+    .holdings-name b { font-variant-numeric:tabular-nums; }
+    .holdings-weight { color:#102A43; font-weight:700; font-variant-numeric:tabular-nums; flex:0 0 auto; }
+    .holdings-caption { color:#8AA0B8; font-size:.72rem; margin-top:.4rem; }
     .page-disclaimer { color:#8AA0B8; font-size:.72rem; line-height:1.5; margin-top:2rem; }
     .pricing-card { background:#FFF; border:1px solid #E2EAF4; border-radius:16px; padding:1.6rem 1.5rem; height:100%; }
     .pricing-card-pro { border:1.5px solid #3B6690; }
@@ -128,6 +135,7 @@ def inject_theme() -> None:
       .etf-row { grid-template-columns:2.9rem 1fr 3.8rem; }
       .ap-donow-grid,.ap-timeline-grid { grid-template-columns:1fr; }
       .analyst-grid { grid-template-columns:1fr; }
+      .holdings-grid { grid-template-columns:1fr; }
     }
     @media(min-width:721px) and (max-width:1000px) {
       .metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); row-gap:.8rem; }
@@ -152,6 +160,36 @@ def page_disclaimer() -> None:
         '<br>Disclaimer: AI- and data-generated content is for informational and analytical purposes only '
         'and does not constitute investment advice.</div>',
         unsafe_allow_html=True,
+    )
+
+
+def _etf_top_holdings_html(view) -> str:
+    """Pure HTML builder for the Step 2A.11 ETF Top Holdings subsection --
+    takes an already-fetched ETFTopHoldings (see core.etf_holdings.
+    get_etf_top_holdings) and returns "" when there is no view (ineligible
+    ticker, or no verified/reference holdings for this ETF), so the caller
+    can omit the whole subsection cleanly rather than render an empty
+    heading (mirrors _key_dates_html's "" contract). Never claims
+    completeness ("前十大持仓合计" only when the reference snapshot actually
+    has 10+ constituents; a smaller ETF gets the honest "已显示持仓合计"
+    instead) -- see core.etf_holdings.ETF_HOLDINGS's own frozen-snapshot
+    docstring."""
+    if view is None or not view.holdings:
+        return ""
+    rows = [
+        f'<div class="holdings-row"><span class="holdings-name"><b>{h.ticker}</b>'
+        f'{" " + h.name if h.name else ""}</span>'
+        f'<span class="holdings-weight">{h.weight:.1%}</span></div>'
+        for h in view.holdings
+    ]
+    mid = (len(rows) + 1) // 2
+    columns = f'<div>{"".join(rows[:mid])}</div><div>{"".join(rows[mid:])}</div>'
+    total_label = "前十大持仓合计" if view.total_reference_count >= 10 else "已显示持仓合计"
+    return (
+        '<div style="margin-top:.9rem;color:#3B6690;font-size:.72rem;font-weight:720;'
+        'letter-spacing:.08em;text-transform:uppercase">主要持仓（Top Holdings）</div>'
+        f'<div class="holdings-grid">{columns}</div>'
+        f'<div class="holdings-caption">{total_label}：{view.displayed_total:.1%} · 基于当前可验证的参考持仓数据</div>'
     )
 
 
@@ -188,6 +226,10 @@ def _security_profile_card(ticker: str, weight: float | None) -> None:
         st.markdown(f'<div class="quiet-card"><b>{ticker}</b><br><small>暂无详细证券介绍</small></div>', unsafe_allow_html=True)
         return
     weight_line = f'<br><br><small>组合占比</small><br><b style="font-size:1.1rem">{weight:.1%}</b>' if weight is not None else ""
+    # Step 2A.11: ETF-only, deterministic/network-free -- reuses the exact
+    # same core.reference.ETF_HOLDINGS snapshot core.analytics already reads
+    # for Page 2 Look-through. Never computed for a stock.
+    top_holdings_html = _etf_top_holdings_html(get_etf_top_holdings(ticker)) if profile.kind_label == "ETF" else ""
     # Session-cached per ticker (mirrors st.session_state.quotes elsewhere in
     # this app) so a Streamlit rerun from an unrelated widget never re-fetches
     # the same ticker's earnings date over the network.
@@ -200,7 +242,7 @@ def _security_profile_card(ticker: str, weight: float | None) -> None:
         f'<small>代码：{profile.ticker} · 类型：{profile.kind_label}</small><br>'
         f'<small>{profile.category_label}：{profile.category_value}</small><br>'
         f'<small>{profile.subcategory_label}：{profile.subcategory_value}</small><br><br>'
-        f'{profile.description}{weight_line}{key_dates_html}</div>',
+        f'{profile.description}{weight_line}{top_holdings_html}{key_dates_html}</div>',
         unsafe_allow_html=True,
     )
 

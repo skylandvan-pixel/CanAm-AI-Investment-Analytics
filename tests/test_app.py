@@ -618,6 +618,105 @@ def test_analyst_view_content_updates_when_selected_ticker_changes(monkeypatch):
     assert "强力买入" not in joined_aapl
 
 
+# --- Step 2A.11: ETF Top Holdings -------------------------------------------
+
+def test_etf_top_holdings_renders_for_eligible_etf_with_reference_data():
+    """VOO is a real demo-portfolio holding with 15 reference constituents
+    (see core.reference.ETF_HOLDINGS) -- selecting it must show the Top
+    Holdings subsection with real constituent tickers/weights, placed
+    inside the existing Security Profile card."""
+    app = _app()
+    app.session_state["treemap_selected"] = "VOO"
+    app.run(timeout=20)
+    assert not app.exception
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "证券简介（Security Profile）" in joined
+    assert "主要持仓（Top Holdings）" in joined
+    assert "AAPL" in joined and "7.0%" in joined
+    assert "前十大持仓合计" in joined
+    assert "基于当前可验证的参考持仓数据" in joined
+
+
+def test_etf_top_holdings_uses_partial_label_for_small_etf():
+    """XLK is a real demo-portfolio holding with only 5 reference
+    constituents -- must never claim "前十大持仓合计" (Top 10)."""
+    app = _app()
+    app.session_state["treemap_selected"] = "XLK"
+    app.run(timeout=20)
+    assert not app.exception
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "主要持仓（Top Holdings）" in joined
+    assert "已显示持仓合计" in joined
+    assert "前十大持仓合计" not in joined
+
+
+def test_etf_top_holdings_omitted_for_etf_without_reference_data():
+    """SGOV is a real demo-portfolio holding with no entry in
+    core.reference.ETF_HOLDINGS -- the section must fail closed and be
+    omitted entirely, never a fake/empty Top Holdings block."""
+    app = _app()
+    app.session_state["treemap_selected"] = "SGOV"
+    app.run(timeout=20)
+    assert not app.exception
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "证券简介（Security Profile）" in joined  # profile itself still renders
+    assert "主要持仓" not in joined
+
+
+def test_etf_top_holdings_never_shown_for_individual_stocks():
+    app = _app()
+    for ticker in ("NVDA", "AAPL"):
+        app.session_state["treemap_selected"] = ticker
+        app.run(timeout=20)
+        assert not app.exception
+        joined = "\n".join(m.value for m in app.markdown)
+        assert "主要持仓" not in joined
+
+
+def test_etf_top_holdings_placement_between_weight_and_key_dates():
+    """Step 2A.11 hierarchy: Security Profile -> portfolio weight -> Top
+    Holdings -> Key Dates -> Asset Allocation -> Portfolio Insights."""
+    app = _app()
+    app.session_state["treemap_selected"] = "VOO"
+    app.run(timeout=20)
+    joined = "\n".join(m.value for m in app.markdown)
+    weight_idx = joined.index("组合占比")
+    holdings_idx = joined.index("主要持仓（Top Holdings）")
+    key_dates_idx = joined.index("关键关注日期")
+    allocation_idx = joined.index("资产配置（Asset Allocation）")
+    assert weight_idx < holdings_idx < key_dates_idx < allocation_idx
+
+
+def test_etf_top_holdings_makes_no_network_call(monkeypatch):
+    """Selecting an ETF must never trigger a new yfinance fetch solely for
+    Top Holdings -- core.etf_holdings is a pure local dict lookup."""
+    import yfinance as yf
+
+    def _forbidden_ticker(*args, **kwargs):
+        raise AssertionError("must not construct yf.Ticker for Top Holdings")
+
+    monkeypatch.setattr(yf, "Ticker", _forbidden_ticker)
+    app = _app()
+    app.session_state["treemap_selected"] = "VOO"
+    app.run(timeout=20)
+    assert not app.exception
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "主要持仓（Top Holdings）" in joined
+
+
+def test_etf_top_holdings_selection_requires_no_gemini_or_anthropic_call(monkeypatch):
+    import core.ai
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("ETF Top Holdings must never call run_ai_analysis")
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _forbidden)
+    app = _app()
+    app.session_state["treemap_selected"] = "VOO"
+    app.run(timeout=20)
+    assert not app.exception
+
+
 def test_risk_level_value_is_chinese_only_no_english_suffix():
     app = _app()
     assert not app.exception

@@ -250,3 +250,79 @@ def test_analyst_view_html_preserves_consensus_before_target_order():
     view = AnalystView("NVDA", consensus=_consensus(), target=_target())
     html = ui._analyst_view_html(view)
     assert html.index("ANALYST CONSENSUS") < html.index("12-MONTH TARGET")
+
+
+# --- Step 2A.11: ETF Top Holdings -------------------------------------------
+
+from core.etf_holdings import ETFHoldingRow, ETFTopHoldings  # noqa: E402
+
+
+def _holdings_view(**overrides):
+    rows = overrides.pop("holdings", (
+        ETFHoldingRow("AAPL", "Apple Inc.", 0.07),
+        ETFHoldingRow("MSFT", "Microsoft Corporation", 0.066),
+    ))
+    defaults = dict(
+        ticker="VOO", holdings=rows,
+        displayed_total=sum(r.weight for r in rows), total_reference_count=15,
+    )
+    defaults.update(overrides)
+    return ETFTopHoldings(**defaults)
+
+
+def test_etf_top_holdings_html_empty_when_view_none():
+    assert ui._etf_top_holdings_html(None) == ""
+
+
+def test_etf_top_holdings_html_empty_when_no_holdings():
+    view = ETFTopHoldings(ticker="VOO", holdings=(), displayed_total=0.0, total_reference_count=0)
+    assert ui._etf_top_holdings_html(view) == ""
+
+
+def test_etf_top_holdings_html_renders_ticker_name_and_weight():
+    html = ui._etf_top_holdings_html(_holdings_view())
+    assert "主要持仓（Top Holdings）" in html
+    assert "AAPL" in html and "Apple Inc." in html and "7.0%" in html
+    assert "MSFT" in html and "Microsoft Corporation" in html and "6.6%" in html
+
+
+def test_etf_top_holdings_html_omits_name_when_none():
+    rows = (ETFHoldingRow("XYZ", None, 0.05),)
+    html = ui._etf_top_holdings_html(_holdings_view(holdings=rows, total_reference_count=1))
+    assert "XYZ" in html and "5.0%" in html
+    # No stray "None" text where a missing name would otherwise render.
+    assert "None" not in html
+
+
+def test_etf_top_holdings_html_uses_top10_label_when_ten_or_more_reference_holdings():
+    html = ui._etf_top_holdings_html(_holdings_view(total_reference_count=15))
+    assert "前十大持仓合计" in html
+    assert "已显示持仓合计" not in html
+
+
+def test_etf_top_holdings_html_uses_partial_label_when_fewer_than_ten_reference_holdings():
+    """Step 2A.11: never claim "Top 10" when the ETF's own reference
+    snapshot has fewer than 10 constituents in total -- even though every
+    one of them is displayed."""
+    html = ui._etf_top_holdings_html(_holdings_view(total_reference_count=5))
+    assert "已显示持仓合计" in html
+    assert "前十大持仓合计" not in html
+
+
+def test_etf_top_holdings_html_shows_reference_data_caption():
+    html = ui._etf_top_holdings_html(_holdings_view())
+    assert "基于当前可验证的参考持仓数据" in html
+
+
+def test_etf_top_holdings_html_never_claims_full_completeness():
+    """Never imply exhaustive/complete constituent coverage -- this is a
+    frozen Top-N reference snapshot, not full ETF holdings data."""
+    html = ui._etf_top_holdings_html(_holdings_view())
+    for forbidden in ("完整持仓", "全部持仓", "完整前十大", "完整穿透", "Top 10 holdings"):
+        assert forbidden not in html
+
+
+def test_etf_top_holdings_html_total_calculated_correctly():
+    rows = (ETFHoldingRow("AAPL", "Apple Inc.", 0.07), ETFHoldingRow("MSFT", "Microsoft Corporation", 0.066))
+    html = ui._etf_top_holdings_html(_holdings_view(holdings=rows, displayed_total=0.136))
+    assert "13.6%" in html
