@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from core.analyst_view import get_analyst_view
 from core.analytics import treemap_rows
 from core.key_dates import get_security_key_dates, format_event_date
 from core.market_regime import STATUS_UNAVAILABLE, get_market_regime_snapshot
@@ -66,6 +67,14 @@ def inject_theme() -> None:
     .etf-indirect { background:#9FB8C9; height:100%; }
     .etf-legend { display:flex; gap:1.1rem; font-size:.76rem; color:#58708D; margin:.2rem 0 .7rem; }
     .etf-legend i { display:inline-block; width:.62rem; height:.62rem; border-radius:2px; margin-right:.35rem; vertical-align:middle; }
+    .analyst-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; margin:.5rem 0 1rem; }
+    .analyst-card { padding:.9rem 1rem; }
+    .analyst-consensus-label { color:#102A43; font-weight:760; font-size:1.05rem; margin:.35rem 0 .5rem; }
+    .analyst-row { display:flex; justify-content:space-between; align-items:center; font-size:.86rem; color:#40566F; padding:.2rem 0; }
+    .analyst-row b { color:#102A43; font-variant-numeric:tabular-nums; }
+    .analyst-caption { color:#8AA0B8; font-size:.72rem; margin-top:.5rem; }
+    .analyst-pct-pos { color:#3B6690; font-weight:700; font-size:.8rem; margin-left:.3rem; }
+    .analyst-pct-neg { color:#C92A2A; font-weight:700; font-size:.8rem; margin-left:.3rem; }
     .page-disclaimer { color:#8AA0B8; font-size:.72rem; line-height:1.5; margin-top:2rem; }
     .pricing-card { background:#FFF; border:1px solid #E2EAF4; border-radius:16px; padding:1.6rem 1.5rem; height:100%; }
     .pricing-card-pro { border:1.5px solid #3B6690; }
@@ -118,6 +127,7 @@ def inject_theme() -> None:
       .rank-row { grid-template-columns:1.1rem 2.8rem 1fr 3.2rem; }
       .etf-row { grid-template-columns:2.9rem 1fr 3.8rem; }
       .ap-donow-grid,.ap-timeline-grid { grid-template-columns:1fr; }
+      .analyst-grid { grid-template-columns:1fr; }
     }
     @media(min-width:721px) and (max-width:1000px) {
       .metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); row-gap:.8rem; }
@@ -192,6 +202,66 @@ def _security_profile_card(ticker: str, weight: float | None) -> None:
         f'<small>{profile.subcategory_label}：{profile.subcategory_value}</small><br><br>'
         f'{profile.description}{weight_line}{key_dates_html}</div>',
         unsafe_allow_html=True,
+    )
+
+
+def _analyst_view(ticker: str):
+    """Session-cached like key_dates_cache above -- analyst consensus and
+    12-month target data change far more slowly than price data, so one
+    fetch per Streamlit session per ticker is enough and avoids refetching
+    recommendation/target data on every unrelated rerun."""
+    cache = st.session_state.setdefault("analyst_view_cache", {})
+    if ticker not in cache:
+        cache[ticker] = get_analyst_view(ticker)
+    return cache[ticker]
+
+
+def _analyst_view_html(view) -> str:
+    """Pure HTML builder for the Step 2A.9 Analyst View section -- takes an
+    already-fetched AnalystView (see core.analyst_view.get_analyst_view) and
+    returns "" when there is no view at all, or when neither subsection has
+    valid data, so the caller can omit the whole section cleanly rather than
+    render an empty heading (mirrors _key_dates_html/_portfolio_insights_html's
+    "" contract). Consensus and target render independently -- one
+    subsection's own fail-closed None never blocks the other from showing."""
+    if view is None or (view.consensus is None and view.target is None):
+        return ""
+    consensus_html = ""
+    if view.consensus is not None:
+        c = view.consensus
+        label_html = f'<div class="analyst-consensus-label">{c.label}</div>' if c.label else ""
+        consensus_html = (
+            '<div class="quiet-card analyst-card">'
+            '<div class="member-role">分析师评级（ANALYST CONSENSUS）</div>'
+            f'{label_html}'
+            f'<div class="analyst-row"><span>买入</span><b>{c.buy}</b></div>'
+            f'<div class="analyst-row"><span>持有</span><b>{c.hold}</b></div>'
+            f'<div class="analyst-row"><span>卖出</span><b>{c.sell}</b></div>'
+            f'<div class="analyst-caption">评级覆盖：{c.total} 位分析师</div>'
+            '</div>'
+        )
+    target_html = ""
+    if view.target is not None:
+        t = view.target
+        prefix = "$" if t.currency == "USD" else f"{t.currency} "
+
+        def _pct(value: float) -> str:
+            cls = "analyst-pct-neg" if value < 0 else "analyst-pct-pos"
+            return f'<span class="{cls}">{value:+.1f}%</span>'
+
+        target_html = (
+            '<div class="quiet-card analyst-card">'
+            '<div class="member-role">12个月目标价（12-MONTH TARGET）</div>'
+            f'<div class="analyst-row"><span>最高</span><span><b>{prefix}{t.high:.2f}</b>{_pct(t.high_pct)}</span></div>'
+            f'<div class="analyst-row"><span>平均</span><span><b>{prefix}{t.mean:.2f}</b>{_pct(t.mean_pct)}</span></div>'
+            f'<div class="analyst-row"><span>最低</span><span><b>{prefix}{t.low:.2f}</b>{_pct(t.low_pct)}</span></div>'
+            f'<div class="analyst-row"><span>当前</span><b>{prefix}{t.current:.2f}</b></div>'
+            '<div class="analyst-caption">目标价基于最近可用数据</div>'
+            '</div>'
+        )
+    return (
+        '<div class="section-label">分析师观点（ANALYST VIEW）</div>'
+        f'<div class="analyst-grid">{consensus_html}{target_html}</div>'
     )
 
 
@@ -292,6 +362,9 @@ def overview(result: AnalyticsResult) -> None:
         # (core/security_profile.py). No network or LLM call.
         weight = next((r["weight"] for r in rows if r["ticker"] == selected), None)
         _security_profile_card(selected, weight)
+        analyst_view_html = _analyst_view_html(_analyst_view(selected))
+        if analyst_view_html:
+            st.markdown(analyst_view_html, unsafe_allow_html=True)
     st.markdown('<div class="section-label">资产配置（Asset Allocation）</div>', unsafe_allow_html=True)
     alloc = pd.DataFrame([{"asset_key": k, "weight": v} for k, v in result.asset_allocation.items() if v > 0]).sort_values("weight", ascending=False)
     alloc["label"] = alloc.apply(lambda r: f"{ASSET_CLASS_LABELS_ZH.get(r.asset_key, r.asset_key)}（{ASSET_CLASS_LABELS_EN.get(r.asset_key, r.asset_key)}） {r.weight:.1%}", axis=1)

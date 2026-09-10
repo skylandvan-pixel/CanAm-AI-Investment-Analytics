@@ -154,3 +154,99 @@ def test_market_regime_html_uses_lighter_visual_class_than_kpi_metric_grid():
 
     for status, label in [("partial", "中性"), ("complete", "风险升高"), ("complete", "防御")]:
         assert label in ui._market_regime_html(_FakeRegimeSnapshot(status=status, current_regime_label=label))
+
+
+# --- Step 2A.9: Analyst Consensus + 12-Month Target -------------------------
+
+from core.analyst_view import AnalystConsensus, AnalystTarget, AnalystView  # noqa: E402
+
+
+def _consensus(**overrides):
+    defaults = dict(buy=57, hold=2, sell=1, total=60, label="强力买入")
+    defaults.update(overrides)
+    return AnalystConsensus(**defaults)
+
+
+def _target(**overrides):
+    defaults = dict(
+        currency="USD", current=218.68, high=515.0, mean=327.6544, low=180.0,
+        high_pct=135.5, mean_pct=49.8, low_pct=-17.7,
+    )
+    defaults.update(overrides)
+    return AnalystTarget(**defaults)
+
+
+def test_analyst_view_html_empty_when_view_none():
+    assert ui._analyst_view_html(None) == ""
+
+
+def test_analyst_view_html_empty_when_both_subsections_none():
+    view = AnalystView("NVDA", consensus=None, target=None)
+    assert ui._analyst_view_html(view) == ""
+
+
+def test_analyst_view_html_renders_consensus_card():
+    view = AnalystView("NVDA", consensus=_consensus(), target=None)
+    html = ui._analyst_view_html(view)
+    assert "分析师观点（ANALYST VIEW）" in html
+    assert "分析师评级（ANALYST CONSENSUS）" in html
+    assert "强力买入" in html
+    assert "买入" in html and "57" in html
+    assert "持有" in html and ">2<" in html
+    assert "卖出" in html and ">1<" in html
+    assert "评级覆盖：60 位分析师" in html
+
+
+def test_analyst_view_html_omits_label_when_none():
+    view = AnalystView("NVDA", consensus=_consensus(label=None), target=None)
+    html = ui._analyst_view_html(view)
+    assert "analyst-consensus-label" not in html
+    assert "57" in html  # counts still render
+
+
+def test_analyst_view_html_renders_target_card_with_pct():
+    view = AnalystView("NVDA", consensus=None, target=_target())
+    html = ui._analyst_view_html(view)
+    assert "12个月目标价（12-MONTH TARGET）" in html
+    assert "$515.00" in html and "+135.5%" in html
+    assert "$327.65" in html and "+49.8%" in html
+    assert "$180.00" in html and "-17.7%" in html
+    assert "$218.68" in html
+    assert "目标价基于最近可用数据" in html
+
+
+def test_analyst_view_html_negative_pct_uses_negative_class():
+    view = AnalystView("NVDA", consensus=None, target=_target())
+    html = ui._analyst_view_html(view)
+    assert "analyst-pct-neg" in html
+    idx = html.index("-17.7%")
+    assert "analyst-pct-neg" in html[max(0, idx - 60):idx]
+
+
+def test_analyst_view_html_non_usd_currency_shown_natively():
+    view = AnalystView("VDY", consensus=None, target=_target(currency="CAD"))
+    html = ui._analyst_view_html(view)
+    assert "CAD 515.00" in html
+    assert "$515.00" not in html
+
+
+def test_analyst_view_html_consensus_failure_does_not_block_target():
+    view = AnalystView("NVDA", consensus=None, target=_target())
+    html = ui._analyst_view_html(view)
+    assert "分析师观点（ANALYST VIEW）" in html
+    assert "12个月目标价" in html
+    assert "ANALYST CONSENSUS" not in html
+
+
+def test_analyst_view_html_target_failure_does_not_block_consensus():
+    view = AnalystView("NVDA", consensus=_consensus(), target=None)
+    html = ui._analyst_view_html(view)
+    assert "分析师观点（ANALYST VIEW）" in html
+    assert "分析师评级（ANALYST CONSENSUS）" in html
+    assert "12-MONTH TARGET" not in html
+
+
+def test_analyst_view_html_preserves_consensus_before_target_order():
+    view = AnalystView("NVDA", consensus=_consensus(), target=_target())
+    html = ui._analyst_view_html(view)
+    assert html.index("ANALYST CONSENSUS") < html.index("12-MONTH TARGET")

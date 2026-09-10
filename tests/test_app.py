@@ -509,6 +509,115 @@ def test_key_dates_selection_requires_no_gemini_or_anthropic_call(monkeypatch):
     assert not app.exception
 
 
+# --- Step 2A.9: Analyst Consensus + 12-Month Target -------------------------
+
+def test_analyst_view_appears_for_eligible_stock_with_data(monkeypatch):
+    """Step 2A.9: selecting an eligible stock with valid analyst data shows
+    the 分析师观点（ANALYST VIEW）section below Key Dates, inside Page 1's
+    existing Security Profile flow."""
+    import ui
+    from core.analyst_view import AnalystConsensus, AnalystTarget, AnalystView
+
+    view = AnalystView(
+        "NVDA",
+        consensus=AnalystConsensus(buy=57, hold=2, sell=1, total=60, label="强力买入"),
+        target=AnalystTarget(
+            currency="USD", current=218.68, high=515.0, mean=327.6544, low=180.0,
+            high_pct=135.5, mean_pct=49.8, low_pct=-17.7,
+        ),
+    )
+    monkeypatch.setattr(ui, "get_analyst_view", lambda ticker: view)
+    app = _app()
+    app.session_state["treemap_selected"] = "NVDA"
+    app.run(timeout=20)
+    assert not app.exception
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "分析师观点（ANALYST VIEW）" in joined
+    assert "强力买入" in joined
+
+
+def test_analyst_view_omitted_for_etf_with_no_live_network_call(monkeypatch):
+    """Step 2A.9: an ETF is never eligible -- the real core function must
+    return None before any yfinance network call is attempted, and Page 1
+    must still render cleanly with the section simply omitted."""
+    import ui
+    import yfinance as yf
+    from core.analyst_view import get_analyst_view as real_get_analyst_view
+
+    def _forbidden_ticker(*args, **kwargs):
+        raise AssertionError("must not construct yf.Ticker for an ineligible ETF")
+
+    monkeypatch.setattr(yf, "Ticker", _forbidden_ticker)
+    monkeypatch.setattr(ui, "get_analyst_view", real_get_analyst_view)
+    app = _app()
+    app.session_state["treemap_selected"] = "VOO"
+    app.run(timeout=20)
+    assert not app.exception
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "分析师观点" not in joined
+
+
+def test_analyst_view_failure_does_not_break_security_profile(monkeypatch):
+    """Fail-closed: when analyst data is unavailable, the rest of the
+    Security Profile card (description, Key Dates) must still render."""
+    import ui
+
+    monkeypatch.setattr(ui, "get_analyst_view", lambda ticker: None)
+    app = _app()
+    app.session_state["treemap_selected"] = "NVDA"
+    app.run(timeout=20)
+    assert not app.exception
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "英伟达" in joined and "NVIDIA" in joined
+    assert "分析师观点" not in joined
+
+
+def test_analyst_view_selection_requires_no_gemini_or_anthropic_call(monkeypatch):
+    """Step 2A.9: Analyst View is Layer 1 market-consensus data -- selecting
+    a security with analyst data present must never touch core.ai."""
+    import core.ai
+    import ui
+    from core.analyst_view import AnalystConsensus, AnalystView
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("Analyst View must never call run_ai_analysis")
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _forbidden)
+    monkeypatch.setattr(ui, "get_analyst_view", lambda ticker: AnalystView(
+        ticker, consensus=AnalystConsensus(buy=1, hold=1, sell=1, total=3, label="持有"), target=None,
+    ))
+    app = _app()
+    app.session_state["treemap_selected"] = "NVDA"
+    app.run(timeout=20)
+    assert not app.exception
+
+
+def test_analyst_view_content_updates_when_selected_ticker_changes(monkeypatch):
+    """The Analyst View content must update when the selected security
+    changes -- never show a previous ticker's stale data."""
+    import ui
+    from core.analyst_view import AnalystConsensus, AnalystView
+
+    def _fake(ticker):
+        if ticker == "NVDA":
+            return AnalystView(ticker, consensus=AnalystConsensus(buy=1, hold=0, sell=0, total=1, label="强力买入"), target=None)
+        if ticker == "AAPL":
+            return AnalystView(ticker, consensus=AnalystConsensus(buy=0, hold=1, sell=0, total=1, label="持有"), target=None)
+        return None
+
+    monkeypatch.setattr(ui, "get_analyst_view", _fake)
+    app = _app()
+    app.session_state["treemap_selected"] = "NVDA"
+    app.run(timeout=20)
+    joined_nvda = "\n".join(m.value for m in app.markdown)
+    assert "强力买入" in joined_nvda
+
+    app.session_state["treemap_selected"] = "AAPL"
+    app.run(timeout=20)
+    joined_aapl = "\n".join(m.value for m in app.markdown)
+    assert "强力买入" not in joined_aapl
+
+
 def test_risk_level_value_is_chinese_only_no_english_suffix():
     app = _app()
     assert not app.exception

@@ -25,6 +25,21 @@ def _no_live_market_regime_network_by_default(monkeypatch):
     monkeypatch.setattr(ui, "get_market_regime_snapshot", lambda *a, **k: MarketRegimeSnapshot())
 
 
+@pytest.fixture(autouse=True)
+def _no_live_analyst_view_network_by_default(monkeypatch):
+    """Step 2A.9: selecting a security on Page 1 fetches live analyst
+    consensus/target data via yfinance. Without this guard, any AppTest that
+    selects a stock (e.g. the existing NVDA/AAPL treemap-selection tests)
+    would make a real network call. Defaults every test to no analyst data
+    (None) -- itself exercising the real fail-closed/omit-when-unavailable
+    path; a test that needs specific Analyst View content overrides this
+    with its own monkeypatch.setattr(ui, "get_analyst_view", ...), which
+    wins since it runs after this fixture within the same test."""
+    import ui
+
+    monkeypatch.setattr(ui, "get_analyst_view", lambda *a, **k: None)
+
+
 @pytest.fixture
 def quote_factory():
     def make(*tickers):
