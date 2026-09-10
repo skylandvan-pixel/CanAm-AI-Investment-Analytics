@@ -62,7 +62,16 @@ VALID = {
 # security_actions dropped its minItems=1 constraint (a genuinely no-action
 # portfolio may now return an empty list -- see _validate_action_plan_quality
 # and the Step 2A.3 report) -- a 15-byte *decrease*, no new $defs.
-_BASELINE_SCHEMA_BYTES = 4088
+# Rebaselined a fourth time in Step 2A.10.1: CommitteeMember.stance's enum
+# dropped "维持配置" ("maintain configuration") -- a production regression
+# showed the model using it as a specialist verdict LABEL to endorse the
+# current overall allocation, which this product's Layer 1 data never
+# proves (see the no-action-vs-maintain-allocation rule in core.ai._prompt
+# and _MAINTAIN_ALLOCATION_PHRASES). Removed at the schema level so the
+# model cannot structurally select it -- "暂缓行动" (defer action) already
+# covers the correct "no current trigger" semantic, so no replacement
+# value was added. A 16-byte *decrease*, no new $defs.
+_BASELINE_SCHEMA_BYTES = 4072
 _BASELINE_SCHEMA_DEFS = 4
 
 
@@ -2701,6 +2710,172 @@ def test_validate_semantic_overreach_fails_closed_on_sgov_current_weight_as_targ
         _validate_semantic_overreach_language(committee)
 
 
+# ============================================================================
+# Step 2A.10.1 -- Final no-action semantic guardrail. A live CAD-scenario
+# production regression: "no NEW deterministic risk flag this round" /
+# "look-through coverage is limited" was misread as license to endorse the
+# current overall allocation ("保持既有持仓框架"/"保持现有直接持仓结构不变"/
+# "维持配置"), the same A1 maintain-allocation overreach as Step 2A.8 but
+# using a different phrase family (naming "持仓框架"/"持仓结构"/bare "配置"
+# directly, not "资产配置框架"). Same guardrail (_validate_semantic_
+# overreach_language, always runs regardless of coverage), extended
+# vocabulary -- see _MAINTAIN_ALLOCATION_PHRASES.
+# ============================================================================
+
+def test_validate_semantic_overreach_fails_closed_on_existing_holdings_framework_claim():
+    """CAD-scenario production regression, verbatim: "保持既有持仓框架" is the
+    same maintain-allocation overreach as "维持整体资产配置框架", just phrased
+    without the word "资产"."""
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(_committee(chairman_decision="保持既有持仓框架，静待后续数据。"))
+    with pytest.raises(ValueError, match="maintain-current-allocation"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_direct_holding_structure_unchanged_claim():
+    """CAD-scenario production regression, verbatim: "保持现有直接持仓结构不变"
+    appeared in Do Now, asserting the current direct-holding structure is
+    correct with no independent target-allocation optimizer behind it."""
+    from core.ai import _validate_semantic_overreach_language
+
+    payload = _committee()
+    payload["action_plan"]["do_now"] = ["保持现有直接持仓结构不变"]
+    committee = CommitteeResult.model_validate(payload)
+    with pytest.raises(ValueError, match="maintain-current-allocation"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_bare_maintain_configuration_claim():
+    """CAD-scenario production regression, verbatim: bare "维持配置" (no
+    "整体"/"框架" qualifier) used as a free-text conclusion must still fail
+    closed -- not only when it appears as the (now-removed) stance enum
+    value, see test_committee_member_stance_no_longer_allows_maintain_
+    configuration below for that separate schema-level guardrail."""
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(_committee(majority_view="鉴于本轮未触发新的确定性风险警报，维持配置。"))
+    with pytest.raises(ValueError, match="maintain-current-allocation"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_keep_existing_configuration_claim():
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(_committee(main_concern="当前证据支持保持现有配置。"))
+    with pytest.raises(ValueError, match="maintain-current-allocation"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_maintain_existing_holdings_claim():
+    from core.ai import _validate_semantic_overreach_language
+
+    payload = _committee()
+    for member in payload["members"]:
+        if member["role"] == "action_rebalancing":
+            member["conclusion"] = "建议维持现有持仓，无需任何调整。"
+    committee = CommitteeResult.model_validate(payload)
+    with pytest.raises(ValueError, match=r"members\[action_rebalancing\]"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_current_configuration_reasonable_claim():
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(_committee(chairman_decision="综合评估后认为当前配置合理。"))
+    with pytest.raises(ValueError, match="maintain-current-allocation"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_current_structure_appropriate_claim():
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(_committee(chairman_decision="当前结构适宜，无需采取进一步行动。"))
+    with pytest.raises(ValueError, match="maintain-current-allocation"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_fails_closed_on_no_adjustment_needed_claim():
+    from core.ai import _validate_semantic_overreach_language
+
+    payload = _committee()
+    payload["action_plan"]["top_actions"] = ["无需调整现有配置"]
+    committee = CommitteeResult.model_validate(payload)
+    with pytest.raises(ValueError, match="maintain-current-allocation"):
+        _validate_semantic_overreach_language(committee)
+
+
+def test_validate_semantic_overreach_allows_approved_no_action_wording():
+    """The Step 2A.10.1 approved replacement framing -- "no current trade
+    triggered by verified evidence," never "maintain the allocation" --
+    must pass cleanly across every field it could appear in."""
+    from core.ai import _validate_semantic_overreach_language
+
+    payload = _committee(
+        chairman_decision="当前证据既不足以支持大幅调仓，也不足以确认现有配置应维持不变，现阶段不触发具体交易。",
+        majority_view="当前已验证信息不足以支持立即调整。",
+        main_concern="等待更多可验证数据或触发条件后重新评估。",
+    )
+    payload["action_plan"]["do_now"] = ["核对应税账户中相关持仓的实际成本基础", "对相关持仓设定后续重新评估的触发条件"]
+    committee = CommitteeResult.model_validate(payload)
+    _validate_semantic_overreach_language(committee)  # must not raise
+
+
+def test_validate_semantic_overreach_allows_negated_maintain_configuration_phrasing():
+    """A negated use of the new bare "维持配置"/"保持现有配置" phrases is the
+    correct, required framing (explicitly denying an allocation endorsement)
+    and must never be rejected -- mirrors test_validate_semantic_overreach_
+    allows_negated_phrasing for the Step 2A.8 phrase family."""
+    from core.ai import _validate_semantic_overreach_language
+
+    committee = CommitteeResult.model_validate(
+        _committee(main_concern="当前证据不足以确认应维持配置，也不足以确认应保持现有配置，需等待更多数据。")
+    )
+    _validate_semantic_overreach_language(committee)  # must not raise
+
+
+# --- Specialist verdict schema: "维持配置" removed from stance enum ---------
+
+def test_committee_member_stance_no_longer_allows_maintain_configuration():
+    """Step 2A.10.1: "维持配置" is removed from CommitteeMember.stance's
+    Literal enum at the schema level -- the model can no longer structurally
+    select it as a specialist verdict LABEL to endorse the current overall
+    allocation (the exact production regression: "Specialist labels/content
+    included: 维持配置")."""
+    from core.ai import CommitteeMember
+
+    with pytest.raises(ValidationError):
+        CommitteeMember.model_validate({"role": "risk", "stance": "维持配置", "conclusion": "test"})
+
+
+def test_committee_member_stance_still_allows_defer_action():
+    """"暂缓行动" (defer action) already covers the correct "no current
+    trigger, not an allocation endorsement" semantic and must remain a
+    valid stance -- no replacement value was needed for the removed
+    "维持配置"."""
+    from core.ai import CommitteeMember
+
+    member = CommitteeMember.model_validate({"role": "risk", "stance": "暂缓行动", "conclusion": "test"})
+    assert member.stance == "暂缓行动"
+
+
+def test_committee_member_stance_allows_all_remaining_four_values():
+    from core.ai import CommitteeMember
+
+    for stance in ("持有并优化", "降低风险", "增加风险", "暂缓行动"):
+        member = CommitteeMember.model_validate({"role": "risk", "stance": stance, "conclusion": "test"})
+        assert member.stance == stance
+
+
+def test_committee_result_rejects_maintain_configuration_stance_anywhere_in_members():
+    """The schema-level rejection holds for any of the six specialist slots,
+    not only when constructing a bare CommitteeMember in isolation."""
+    payload = _committee()
+    payload["members"][0]["stance"] = "维持配置"
+    with pytest.raises(ValidationError):
+        CommitteeResult.model_validate(payload)
+
+
 def test_validate_semantic_overreach_fails_closed_on_low_correlation_claim():
     """A2: no correlation model exists -- a destination asset must never be
     claimed as low/negatively correlated."""
@@ -2797,6 +2972,40 @@ def test_run_ai_analysis_fails_closed_on_maintain_allocation_production_regressi
         run_ai_analysis(mixed_result, provider=FakeProvider(broken), cache_dir=tmp_path)
 
 
+def test_run_ai_analysis_fails_closed_on_cad_scenario_no_action_production_regression(tmp_path, low_confidence_result):
+    """Step 2A.10.1 live CAD-scenario production regression, full path: a
+    portfolio with zero deterministic risk_flags and materially incomplete
+    look-through coverage (low_confidence_result: Risk Level "Measured",
+    XLF has no published constituent data) -- the same shape as the real
+    production case (Portfolio Score 76 / Risk Level 适中 / Top 3 64.8% /
+    Equity 64.2% / Bonds & Cash-like 35.4% / limited ETF look-through / no
+    new deterministic risk alert). The AI must never turn "no trigger" into
+    an allocation endorsement -- "保持既有持仓框架"/"维持配置"/"保持现有直接
+    持仓结构不变" must all fail closed end-to-end via run_ai_analysis."""
+    broken = _committee(
+        chairman_decision="鉴于本轮未触发新的确定性风险警报，保持既有持仓框架，维持配置。",
+    )
+    broken["action_plan"]["do_now"] = ["保持现有直接持仓结构不变"]
+    broken["action_plan"]["security_actions"] = []
+    with pytest.raises(ProviderUnavailable):
+        run_ai_analysis(low_confidence_result, provider=FakeProvider(broken), cache_dir=tmp_path)
+
+
+def test_run_ai_analysis_succeeds_with_cad_scenario_approved_no_action_wording(tmp_path, low_confidence_result):
+    """The same CAD-scenario portfolio, phrased with the Step 2A.10.1
+    approved no-action/reassess-later framing instead, must succeed
+    end-to-end -- "no trigger" is a supported claim, only "maintain the
+    allocation" is not."""
+    ok = _committee(
+        chairman_decision="当前已验证信息不足以支持立即调整，现阶段不触发具体交易，等待更多可验证数据或触发条件后重新评估。",
+    )
+    ok["action_plan"]["do_now"] = ["核对相关持仓的实际成本基础", "关注后续可验证的穿透数据更新"]
+    ok["action_plan"]["security_actions"] = []
+    parsed, meta = run_ai_analysis(low_confidence_result, provider=FakeProvider(ok), cache_dir=tmp_path)
+    assert meta["success"]
+    assert parsed.action_plan.security_actions == []
+
+
 def test_run_ai_analysis_fails_closed_on_low_correlation_production_regression(tmp_path, mixed_result):
     broken = _committee(chairman_decision="逐步将再平衡资金引导至低相关性资产。")
     with pytest.raises(ProviderUnavailable):
@@ -2875,13 +3084,18 @@ def test_schema_bytes_match_step_2a_3_approved_baseline():
     """Step 2A.3's P0/P1 wording fixes are prompt/validation only (no schema
     change); the P1-1 follow-up makes exactly one deliberate, approved
     change -- dropping minItems=1 from security_actions (a 15-byte decrease,
-    no new $defs, see _BASELINE_SCHEMA_BYTES). Any *further* schema drift
-    beyond that should be treated as a new finding, not silently rebaselined
-    again."""
+    no new $defs, see _BASELINE_SCHEMA_BYTES). Step 2A.10.1 makes exactly one
+    further deliberate, approved change -- dropping "维持配置" from
+    CommitteeMember.stance's enum (a 16-byte decrease, no new $defs). Any
+    *further* schema drift beyond that should be treated as a new finding,
+    not silently rebaselined again."""
     schema = CommitteeResult.model_json_schema()
     schema_bytes = len(json.dumps(schema, ensure_ascii=False).encode("utf-8"))
     assert schema_bytes == _BASELINE_SCHEMA_BYTES
     assert len(schema.get("$defs", {})) == _BASELINE_SCHEMA_DEFS
     security_actions_schema = schema["$defs"]["ActionPlan"]["properties"]["security_actions"]
     assert "minItems" not in security_actions_schema
+    stance_schema = schema["$defs"]["CommitteeMember"]["properties"]["stance"]
+    assert "维持配置" not in stance_schema["enum"]
+    assert stance_schema["enum"] == ["持有并优化", "降低风险", "增加风险", "暂缓行动"]
     assert "security_actions" in schema["$defs"]["ActionPlan"]["required"]

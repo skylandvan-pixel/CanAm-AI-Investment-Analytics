@@ -433,11 +433,14 @@ def test_key_dates_module_has_no_llm_or_gemini_dependency():
 
 def test_committee_result_schema_unchanged_by_key_dates_v2():
     """Step 2A.7 is a Page 1 / Layer 1 feature only -- it must never touch
-    the Gemini-facing CommitteeResult schema."""
+    the Gemini-facing CommitteeResult schema. Byte count rebaselined to
+    4072 in Step 2A.10.1 (CommitteeMember.stance dropped "维持配置" -- a
+    deliberate, approved, unrelated schema change; see
+    tests/test_ai.py::test_schema_bytes_match_step_2a_3_approved_baseline)."""
     import json
 
     from core.ai import CommitteeResult
 
     schema = CommitteeResult.model_json_schema()
-    assert len(json.dumps(schema, ensure_ascii=False).encode("utf-8")) == 4088
+    assert len(json.dumps(schema, ensure_ascii=False).encode("utf-8")) == 4072
     assert len(schema.get("$defs", {})) == 4

@@ -317,11 +317,14 @@ def test_build_portfolio_insights_is_empty_safe_for_degenerate_result(mixed_resu
 def test_committee_result_schema_unchanged_by_portfolio_insights():
     """Step 2A.6 is a Page 1 / Layer 1 feature only -- it must never touch
     the Gemini-facing CommitteeResult schema (core/ai.py is untouched by
-    this module entirely)."""
+    this module entirely). Byte count rebaselined to 4072 in Step 2A.10.1
+    (CommitteeMember.stance dropped "维持配置" -- a deliberate, approved,
+    unrelated schema change; see tests/test_ai.py::
+    test_schema_bytes_match_step_2a_3_approved_baseline)."""
     import json
 
     from core.ai import CommitteeResult
 
     schema = CommitteeResult.model_json_schema()
-    assert len(json.dumps(schema, ensure_ascii=False).encode("utf-8")) == 4088
+    assert len(json.dumps(schema, ensure_ascii=False).encode("utf-8")) == 4072
     assert len(schema.get("$defs", {})) == 4

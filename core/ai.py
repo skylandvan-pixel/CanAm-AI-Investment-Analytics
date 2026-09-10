@@ -130,7 +130,18 @@ def _log_ai_fallback(*, provider: str, primary_model: str, fallback_model: str, 
 class CommitteeMember(BaseModel):
     model_config = ConfigDict(extra="forbid")
     role: Literal["macro", "portfolio", "risk", "valuation_data", "tax", "action_rebalancing"]
-    stance: Literal["维持配置", "持有并优化", "降低风险", "增加风险", "暂缓行动"]
+    # Step 2A.10.1: "维持配置" (maintain [the current portfolio] configuration)
+    # removed -- a production regression showed the model using it as a
+    # specialist verdict LABEL to assert the current overall allocation is
+    # correct, which this product's Layer 1 data never proves (see the
+    # no-action-vs-maintain-allocation rule in _prompt and
+    # _MAINTAIN_ALLOCATION_PHRASES below). Removed at the schema level,
+    # not just prompt-guarded, so the model structurally cannot select it --
+    # "暂缓行动" (defer action) already covers the correct "no current
+    # trigger, not an allocation endorsement" semantic, so no replacement
+    # value was needed. Deliberate, approved schema change; see
+    # test_schema_bytes_match_step_2a_10_1_approved_baseline.
+    stance: Literal["持有并优化", "降低风险", "增加风险", "暂缓行动"]
     conclusion: str = Field(min_length=1, max_length=160)
 
 
@@ -454,6 +465,17 @@ _MAINTAIN_ALLOCATION_PHRASES = (
     # VOO/NVDA/SGOV/AAPL/XLK demo portfolio): the same "keep current framework"
     # overreach resurfaced as "保留" (retain) rather than "维持"/"保持".
     "保留核心资产配置框架", "保留整体资产配置框架", "保留现有配置框架", "保留整体配置框架",
+    # Step 2A.10.1 live production regression (CAD-scenario portfolio):
+    # "no NEW deterministic risk flag / incomplete look-through" was
+    # misread as license to endorse the current allocation -- a NEW phrase
+    # family (not "框架"-based), naming "持仓框架"/"持仓结构"/bare "配置"
+    # directly rather than "资产配置框架". See the no-action-vs-maintain-
+    # allocation rule in _prompt: absence of a trigger means only NO
+    # CURRENT TRADE IS TRIGGERED, never that the allocation is endorsed.
+    "保持既有持仓框架", "保持现有直接持仓结构不变", "保持现有直接持仓结构", "保持现有持仓结构不变",
+    "维持配置", "保持现有配置", "保持既有配置", "维持现有配置", "维持现有持仓", "保持现有持仓不变",
+    "当前配置合理", "当前结构适宜", "现有结构适宜", "无需调整现有配置", "现有配置应保持不变",
+    "当前结构应保持不变", "当前配置应保持不变",
 )
 
 # A2: any correlation claim about a holding/destination -- low, negative, OR
@@ -833,6 +855,26 @@ current allocation as "维持整体资产配置框架"/"保持整体框架稳定
 no holding besides an already-flagged one needs attention this round, say so without a
 maintain-current-allocation claim -- e.g. "当前已验证数据未识别出需要优先处理的其他持仓。" or "当前行动重点集中
 在已触发风险警报的持仓。" -- never a blanket "其余核心仓位暂维持不变"/"其余仓位暂维持不变" line.
+
+No-action vs. maintain-allocation rule (Step 2A.10.1): this is the single most important distinction in the
+whole plan and applies everywhere, not only to Fixed Income/cash below. NO DETERMINISTIC RISK TRIGGER FOR THIS
+ROUND and MATERIALLY INCOMPLETE LOOK-THROUGH COVERAGE both mean only that NO CURRENT TRADE IS JUSTIFIED BY
+VERIFIED EVIDENCE -- neither is itself evidence that the current portfolio allocation is correct, appropriate,
+or should be preserved. "Current verified evidence does not justify an immediate trade" is a supported claim;
+"maintain the current allocation"/"keep existing holdings unchanged"/"current structure is appropriate" is NOT,
+because this product still has no target-allocation optimizer proving the current allocation right or wrong --
+absence of a reason to act is not proof the current allocation needs no change either. Never phrase a no-trigger
+or data-limited conclusion as "保持既有持仓框架"/"保持现有直接持仓结构不变"/"维持配置"/"保持现有配置"/"维持现有
+持仓"/"当前配置合理"/"当前结构适宜"/"无需调整现有配置" or any equivalent claim that the current allocation or
+holding structure should stay as-is (this applies at every field: specialist conclusions, majority_view,
+main_concern, chairman_decision, and every action_plan field). Instead phrase it as a no-action/reassess-later
+state using only this packet's own facts, e.g. "当前已验证信息不足以支持立即调整。" / "现阶段不触发具体交易。" /
+"等待更多可验证数据或触发条件后重新评估。" / "当前证据既不足以支持大幅调仓，也不足以确认现有配置应维持不变。"
+This rule targets ENDORSEMENT of the overall current allocation, not every use of hold/wait/observe language --
+a security-level HOLD, WAIT, or CONTROL_ADDITIONS action_plan entry remains fully valid whenever it is genuinely
+grounded in packet-visible facts for that specific holding (see the Decision-confidence rule above), and Do Now
+may still contain a concrete non-action instruction (e.g. "核对应税账户实际成本基础", "对XXX设定分阶段减持的监控
+触发条件") without endorsing the allocation as a whole.
 
 SGOV / Fixed-Income application of the rule above (Step 2A.4): a current SGOV holding, its current direct
 weight, and the aggregate Fixed Income allocation are all facts this packet may contain -- but CURRENT WEIGHT
