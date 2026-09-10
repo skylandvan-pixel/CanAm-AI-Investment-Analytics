@@ -2614,6 +2614,30 @@ def test_concentration_packet_keeps_direct_and_lookthrough_effective_n_as_distin
     assert packet["concentration"]["direct_effective_n"] != packet["concentration"]["lookthrough_effective_n"]
 
 
+def test_fact_packet_never_contains_analyst_view_data(mixed_result):
+    """Step 2A.10 Analyst View isolation: Step 2A.9's Analyst Consensus and
+    12-Month Target data (core.analyst_view) is Page 1 informational-only
+    and must never reach the AI fact packet -- no key at any depth may
+    mention analyst consensus/target data, and core.ai/core.analytics must
+    not import core.analyst_view at all."""
+    import json
+    from pathlib import Path
+
+    from core.analytics import canonical_fact_packet
+
+    packet = canonical_fact_packet(mixed_result)
+    serialized = json.dumps(packet, ensure_ascii=False).lower()
+    for forbidden in ("analyst", "recommendation", "targethigh", "targetlow", "targetmean", "consensus"):
+        assert forbidden not in serialized
+    project_root = Path(__file__).resolve().parents[1]
+    for module in ("core/ai.py", "core/analytics.py"):
+        source = (project_root / module).read_text(encoding="utf-8")
+        assert "analyst_view" not in source
+        assert "AnalystView" not in source
+        assert "AnalystConsensus" not in source
+        assert "AnalystTarget" not in source
+
+
 # ============================================================================
 # Step 2A.8 -- Final Semantic Hardening (Part A)
 #

@@ -458,18 +458,20 @@ def committee_view(
     ai_result, *, holdings=None, quotes=None, cash=None, account_currency=None,
     usd_cad=None, account_type=None, before_result=None,
 ) -> None:
-    """The trade_preview_context kwargs (all optional) are the same canonical
+    """Step 2A.10 decision-first hierarchy: Chairman Decision renders first,
+    immediately followed by the action-oriented Action Plan sections (see
+    _render_action_plan) -- the six specialist opinions, Majority View, and
+    Main Concern are supporting reasoning, not the first thing an ordinary
+    user must read, so they move into a collapsed-by-default expander below
+    the action content. No schema change: CommitteeResult is unchanged,
+    this is purely an information-hierarchy change in the UI layer.
+
+    The trade_preview_context kwargs (all optional) are the same canonical
     holdings/quotes/snapshot inputs already used for the real analysis --
     passing them enables the Step 2A deterministic Trade Impact Preview
     under each REDUCE-type security action; omitting any of them simply
     disables that preview (e.g. in tests that don't need it), never changes
     the rest of the committee rendering."""
-    st.markdown('<div class="section-label">七人投资委员会（Investment Committee）</div>', unsafe_allow_html=True)
-    for offset in range(0, len(ai_result.members), 2):
-        cols = st.columns(2)
-        for col, member in zip(cols, ai_result.members[offset:offset + 2]):
-            col.markdown(f'<div class="quiet-card member"><div class="member-role">{ROLE_LABELS[member.role]}</div><div class="member-stance">{member.stance}</div><div class="member-copy">{member.conclusion}</div></div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="quiet-card" style="margin-top:1rem"><b>多数意见（Majority View）</b><br>{ai_result.majority_view}<br><br><b>主要关切（Main Concern）</b><br>{ai_result.main_concern}</div>', unsafe_allow_html=True)
     st.markdown('<div class="section-label">主席决策（Chairman Decision）</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="quiet-card"><b>{ai_result.chairman_decision}</b></div>', unsafe_allow_html=True)
     _render_action_plan(
@@ -477,6 +479,13 @@ def committee_view(
         account_currency=account_currency, usd_cad=usd_cad, account_type=account_type,
         before_result=before_result,
     )
+    with st.expander("查看七人投资委员会详细意见（View Investment Committee Details）", expanded=False):
+        st.markdown('<div class="section-label">七人投资委员会（Investment Committee）</div>', unsafe_allow_html=True)
+        for offset in range(0, len(ai_result.members), 2):
+            cols = st.columns(2)
+            for col, member in zip(cols, ai_result.members[offset:offset + 2]):
+                col.markdown(f'<div class="quiet-card member"><div class="member-role">{ROLE_LABELS[member.role]}</div><div class="member-stance">{member.stance}</div><div class="member-copy">{member.conclusion}</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="quiet-card" style="margin-top:1rem"><b>多数意见（Majority View）</b><br>{ai_result.majority_view}<br><br><b>主要关切（Main Concern）</b><br>{ai_result.main_concern}</div>', unsafe_allow_html=True)
 
 
 _PRIORITY_CSS = {"高": "ap-priority-high", "中高": "ap-priority-medhigh", "中": "ap-priority-med", "低": "ap-priority-low"}
@@ -485,10 +494,6 @@ _ACTION_LABELS_ZH = {
     "ADD_ON_PULLBACK": "回调后加仓", "STAGED_BUY": "分批买入", "STAGED_SELL": "分批卖出",
     "CONTROL_ADDITIONS": "控制新增", "REVIEW_AFTER_EVENT": "事件后复核",
 }
-_TIMELINE_LABELS = [
-    ("timeline_now", "现在（Now）"), ("timeline_30_days", "未来30天（Next 30 Days）"),
-    ("timeline_3_months", "未来3个月（Next 3 Months）"), ("timeline_6_12_months", "未来6–12个月（6–12 Months）"),
-]
 
 
 def _format_pct(value: float | None) -> str:
@@ -557,18 +562,19 @@ def _render_action_plan(
     plan, *, holdings=None, quotes=None, cash=None, account_currency=None,
     usd_cad=None, account_type=None, before_result=None,
 ) -> None:
+    """Step 2A.10: renders only the decision-actionable subset of the Action
+    Plan -- Do Now / Do Not Do Now, Key Security Actions (with Trade Impact
+    Preview), and Key Events & Reassessment Triggers. strategy_now,
+    top_actions, the four timeline_* lists, and checklist are still
+    generated and validated (see core.ai.ActionPlan -- no schema change),
+    but production output showed them substantially repeating the Chairman
+    Decision and Do Now (see the Step 2A.10 repetition rule), so the UI
+    simply stops rendering those fields rather than changing the schema."""
     st.markdown('<div class="section-label">条件式行动方案（Action Plan）</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-label">当前行动结论（Current Action Summary）</div>', unsafe_allow_html=True)
-    top_actions = "".join(f"<li>{c}</li>" for c in plan.top_actions)
     do_now = "".join(f"<li>{d}</li>" for d in plan.do_now)
     do_not = "".join(f"<li>{d}</li>" for d in plan.do_not_now)
-    st.markdown(
-        f'<div class="quiet-card"><b>当前总策略（Strategy Now）</b><br>{plan.strategy_now}'
-        f'<div style="margin-top:.7rem"><b>本阶段最重要的几件事（Top Actions）</b>'
-        f'<ol style="margin:.35rem 0 0;padding-left:1.2rem">{top_actions}</ol></div></div>',
-        unsafe_allow_html=True,
-    )
     st.markdown(
         f'<div class="ap-donow-grid">'
         f'<div class="quiet-card"><b>现在做（Do Now）</b><ul class="ap-list ap-do-now">{do_now}</ul></div>'
@@ -580,8 +586,13 @@ def _render_action_plan(
         st.markdown('<div class="section-label">重点持仓行动（Key Security Actions）</div>', unsafe_allow_html=True)
         for action in plan.security_actions:
             action_zh = _ACTION_LABELS_ZH.get(action.action, action.action)
+            # Labeled explicitly as an AI-generated scenario range, never as
+            # a deterministic optimizer output -- there is no target-
+            # allocation optimizer in this project (see the Step 2A.10
+            # semantic-hardening rule).
             meta = (
-                f"<b>目标</b> {action.target}<br><b>触发条件</b> {action.trigger}<br><b>理由</b> {action.reason}"
+                f"<b>AI 建议目标区间（AI Suggested Range）</b> {action.target}"
+                f"<br><b>触发条件</b> {action.trigger}<br><b>理由</b> {action.reason}"
             )
             priority_css = _PRIORITY_CSS.get(action.priority, "ap-priority-med")
             trade_preview_html = _trade_impact_preview_html(
@@ -598,16 +609,6 @@ def _render_action_plan(
                 f'</div>', unsafe_allow_html=True,
             )
 
-    st.markdown('<div class="section-label">行动时间线（Action Timeline）</div>', unsafe_allow_html=True)
-    horizon_cards = ""
-    for key, label in _TIMELINE_LABELS:
-        actions_html = "".join(f"<li>{a}</li>" for a in getattr(plan, key))
-        horizon_cards += (
-            f'<div class="ap-timeline-card"><div class="ap-timeline-title">{label}</div>'
-            f'<ul class="ap-list">{actions_html}</ul></div>'
-        )
-    st.markdown(f'<div class="ap-timeline-grid">{horizon_cards}</div>', unsafe_allow_html=True)
-
     st.markdown('<div class="section-label">关键事件与重新评估条件（Key Events &amp; Reassessment Triggers）</div>', unsafe_allow_html=True)
     trigger_rows = "".join(
         f'<div class="ap-calendar-row" style="grid-template-columns:1fr 1fr">'
@@ -618,7 +619,3 @@ def _render_action_plan(
         for trig in plan.reassessment_triggers
     )
     st.markdown(f'<div class="quiet-card">{trigger_rows}</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="section-label">执行清单（Execution Checklist）</div>', unsafe_allow_html=True)
-    checklist_items = "".join(f"<li>{c}</li>" for c in plan.checklist)
-    st.markdown(f'<div class="quiet-card"><ul class="ap-checklist">{checklist_items}</ul></div>', unsafe_allow_html=True)

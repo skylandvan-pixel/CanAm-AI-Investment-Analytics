@@ -831,14 +831,15 @@ def test_final_non_503_error_keeps_generic_unavailable_message(monkeypatch):
     assert app.session_state["ai_error_status"] == 400
 
 
-def test_action_plan_renders_all_sections_without_exception(monkeypatch):
-    """Human-acceptance smoke test for the simplified five-section Action
-    Plan (Page 3): a valid mocked committee result renders every section --
-    Current Action Summary (strategy/top actions/do now/do not now), Key
-    Security Actions, Action Timeline (all 4 horizons), Key Events &
-    Reassessment Triggers, and the Execution Checklist -- with no exception,
-    using only tickers that are real holdings in the demo portfolio the app
-    starts with."""
+def test_action_plan_renders_decision_first_sections_without_exception(monkeypatch):
+    """Step 2A.10 human-acceptance smoke test for the decision-first Page 3
+    hierarchy: a valid mocked committee result renders Chairman Decision,
+    Current Action Summary (do now/do not now only), Key Security Actions,
+    and Key Events & Reassessment Triggers -- with no exception, using only
+    tickers that are real holdings in the demo portfolio the app starts
+    with. Strategy Now, Top Actions, Action Timeline, and the Execution
+    Checklist are deliberately no longer rendered (see the Step 2A.10
+    repetition rule below)."""
     import core.ai
     from tests.test_ai import VALID
 
@@ -857,16 +858,18 @@ def test_action_plan_renders_all_sections_without_exception(monkeypatch):
     assert not app.exception
 
     joined = "\n".join(m.value for m in app.markdown)
+    assert "主席决策" in joined
     assert "当前行动结论" in joined
-    assert "当前总策略" in joined
-    assert "本阶段最重要的几件事" in joined
     assert "现在做" in joined and "现在不做" in joined
     assert "重点持仓行动" in joined
     assert "NVDA" in joined
-    assert "行动时间线" in joined
-    assert "未来30天" in joined and "未来3个月" in joined and "未来6–12个月" in joined
     assert "关键事件与重新评估条件" in joined
-    assert "执行清单" in joined
+    # Deliberately no longer rendered in the primary UI (see the repetition
+    # rule test below) -- the schema still generates these fields.
+    assert "当前总策略" not in joined
+    assert "本阶段最重要的几件事" not in joined
+    assert "行动时间线" not in joined
+    assert "执行清单" not in joined
     # The old standalone modules must be gone from the rendered page.
     assert "组合目标迁移" not in joined
     assert "维持不动的仓位" not in joined
@@ -875,11 +878,12 @@ def test_action_plan_renders_all_sections_without_exception(monkeypatch):
 
 
 def test_action_plan_with_empty_security_actions_renders_without_exception_and_hides_header(monkeypatch):
-    """Step 2A.3 P1-1 follow-up (D, E): a genuinely no-action portfolio may
-    now return security_actions=[] (see core.ai.ActionPlan). The page must
-    not crash, and must not show the "重点持仓行动（Key Security Actions）"
-    section label/heading with nothing under it -- every other section still
-    renders normally."""
+    """Step 2A.3 P1-1 follow-up (D, E), updated for Step 2A.10's decision-
+    first hierarchy: a genuinely no-action portfolio may still return
+    security_actions=[] (see core.ai.ActionPlan). The page must not crash,
+    and must not show the "重点持仓行动（Key Security Actions）" section
+    label/heading with nothing under it -- every other decision-first
+    section still renders normally."""
     import json
 
     import core.ai
@@ -903,12 +907,121 @@ def test_action_plan_with_empty_security_actions_renders_without_exception_and_h
 
     joined = "\n".join(m.value for m in app.markdown)
     assert "重点持仓行动" not in joined
-    # Every other section still renders.
+    # Every other decision-first section still renders.
+    assert "主席决策" in joined
     assert "当前行动结论" in joined
-    assert "当前总策略" in joined
-    assert "行动时间线" in joined
     assert "关键事件与重新评估条件" in joined
-    assert "执行清单" in joined
+
+
+def test_chairman_decision_renders_before_action_plan_and_committee_details(monkeypatch):
+    """Step 2A.10: Chairman Decision must be the first major result on Page
+    3, followed by the Action Plan and Key Security Actions, with the
+    collapsed committee-details expander last -- the user should not have
+    to scroll through six specialist cards before reaching the decision."""
+    import core.ai
+    from tests.test_ai import VALID
+
+    parsed = core.ai.CommitteeResult.model_validate(VALID)
+
+    def _fake_run_ai_analysis(result, **kwargs):
+        return parsed, {"provider": "gemini", "model": "gemini-3.6-flash", "cache_hit": False}
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _fake_run_ai_analysis)
+    app = _app()
+    app.session_state["ai_unlocked"] = True
+    nav = app.segmented_control(key="primary_nav")
+    nav.set_value("3 · AI 投资委员会").run(timeout=20)
+    btn = next(b for b in app.button if b.label == "启动 AI 投资委员会")
+    btn.click().run(timeout=20)
+    assert not app.exception
+
+    # The expander's own label lives on the widget, not in app.markdown --
+    # use a specialist role label (rendered only inside the expander body)
+    # as the proxy for "committee details content" in the ordering check.
+    expander = next(e for e in app.expander if "投资委员会详细意见" in e.label)
+    assert expander.proto.expanded is False
+    joined = "\n".join(m.value for m in app.markdown)
+    chairman_idx = joined.index("主席决策")
+    action_plan_idx = joined.index("条件式行动方案")
+    do_now_idx = joined.index("现在做（Do Now）")
+    key_security_idx = joined.index("重点持仓行动")
+    key_events_idx = joined.index("关键事件与重新评估条件")
+    committee_content_idx = joined.index("宏观与市场")
+    assert chairman_idx < action_plan_idx < do_now_idx < key_security_idx < key_events_idx < committee_content_idx
+
+
+def test_committee_details_collapsed_by_default_and_contains_specialist_content(monkeypatch):
+    """Step 2A.10: the six specialist cards, Majority View, and Main Concern
+    move into a collapsed-by-default expander below the action content --
+    supporting reasoning, not the first thing the user reads. The seven-
+    member architecture (six specialists + Chairman) and every specialist
+    role are preserved, only their position on the page changes."""
+    import core.ai
+    from tests.test_ai import VALID
+
+    parsed = core.ai.CommitteeResult.model_validate(VALID)
+
+    def _fake_run_ai_analysis(result, **kwargs):
+        return parsed, {"provider": "gemini", "model": "gemini-3.6-flash", "cache_hit": False}
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _fake_run_ai_analysis)
+    app = _app()
+    app.session_state["ai_unlocked"] = True
+    nav = app.segmented_control(key="primary_nav")
+    nav.set_value("3 · AI 投资委员会").run(timeout=20)
+    btn = next(b for b in app.button if b.label == "启动 AI 投资委员会")
+    btn.click().run(timeout=20)
+    assert not app.exception
+
+    expander = next(e for e in app.expander if "投资委员会详细意见" in e.label)
+    assert expander.proto.expanded is False
+    inside = "\n".join(m.value for m in expander.markdown)
+    assert "七人投资委员会" in inside
+    for role_label in ["宏观与市场", "组合结构", "风险（Risk）", "估值与数据", "税务与账户", "行动与再平衡"]:
+        assert role_label in inside
+    assert "多数意见" in inside and "维持核心配置并优化结构" in inside
+    assert "主要关切" in inside and "集中度需要持续观察" in inside
+    # Chairman Decision itself is NOT inside this expander -- it already
+    # rendered above, before the expander.
+    assert "主席决策" not in inside
+
+
+def test_ai_suggested_target_range_is_explicitly_labeled(monkeypatch):
+    """Step 2A.10 semantic hardening: any AI-generated target must be
+    explicitly labeled as an AI suggested range, never presented as a
+    deterministic optimizer output -- there is no target-allocation
+    optimizer, correlation model, or destination-recommendation engine in
+    this project."""
+    import json
+
+    import core.ai
+    from tests.test_ai import VALID
+
+    action_plan = json.loads(json.dumps(VALID["action_plan"]))
+    action_plan["security_actions"][0]["target"] = "8%-10%"
+    parsed = core.ai.CommitteeResult.model_validate({**VALID, "action_plan": action_plan})
+
+    def _fake_run_ai_analysis(result, **kwargs):
+        return parsed, {"provider": "gemini", "model": "gemini-3.6-flash", "cache_hit": False}
+
+    monkeypatch.setattr(core.ai, "run_ai_analysis", _fake_run_ai_analysis)
+    app = _app()
+    app.session_state["ai_unlocked"] = True
+    nav = app.segmented_control(key="primary_nav")
+    nav.set_value("3 · AI 投资委员会").run(timeout=20)
+    btn = next(b for b in app.button if b.label == "启动 AI 投资委员会")
+    btn.click().run(timeout=20)
+    assert not app.exception
+
+    joined = "\n".join(m.value for m in app.markdown)
+    assert "AI 建议目标区间" in joined
+    assert "AI Suggested Range" in joined
+    assert "8%-10%" in joined
+    # Never implied as a deterministic optimizer/allocation target -- and
+    # the old bare "目标" label (with no AI-suggested qualifier) is gone.
+    assert "<b>目标</b>" not in joined
+    for forbidden in ("最优配置", "确定性目标", "优化器推荐"):
+        assert forbidden not in joined
 
 
 def test_trade_impact_preview_renders_for_reduce_action_with_reduction_pct(monkeypatch):
