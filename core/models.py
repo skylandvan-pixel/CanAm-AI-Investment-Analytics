@@ -96,6 +96,14 @@ class AnalyticsResult:
     snapshot: PortfolioSnapshot
     portfolio_score: float
     risk_level: str
+    # Step 2B.1: a SEPARATE dimension from risk_level -- how complete the
+    # verified evidence behind that risk assessment is (driven by ETF
+    # look-through coverage), never itself a risk judgment. One of "High" /
+    # "Medium" / "Limited", deterministically derived from lookthrough_
+    # coverage (see core.analytics.analyze) so Page 1/2/3 never compute this
+    # independently. Limited confidence must never be silently upgraded to
+    # High risk, nor High confidence downgraded to imply "risk is low."
+    risk_confidence: str
     asset_allocation: dict[str, float]
     sector_exposure: dict[str, float]
     top_direct: tuple[tuple[str, float], ...]

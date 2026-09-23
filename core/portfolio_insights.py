@@ -75,41 +75,62 @@ def _concentration_insight(risk_flags: tuple[RiskFlag, ...], true_exposures: tup
     return None
 
 
-def _diversification_insight(direct_effective_n: float | None) -> dict | None:
+def _diversification_insight(direct_effective_n: float | None, risk_confidence: str) -> dict | None:
     """Priority D, used only when A does not apply. direct_effective_n is
     used strictly as DIRECT-holdings concentration evidence (Step 2A.4 scope
     rule) -- never translated into an overall/economic/factor diversification
     claim. None (no valid positions) fails closed rather than stating a
-    meaningless "well diversified" claim about an empty portfolio."""
+    meaningless "well diversified" claim about an empty portfolio.
+
+    Step 2B.1: the claim itself is now explicitly scoped to "直接持仓" (direct
+    holdings) rather than a bare "单一持仓集中问题" that could be misread as
+    an overall/look-through-inclusive statement -- the old "分布相对均衡"
+    wording is dropped for the same reason (it read as a whole-portfolio
+    balance claim from Direct-Effective-N-only evidence). When
+    risk_confidence is not "High" (i.e. equity-ETF look-through coverage is
+    materially incomplete -- the same canonical field Page 1/Page 3 both
+    read), a concise limitation is appended so this insight never implies
+    more certainty than the verified evidence supports."""
     if direct_effective_n is None:
         return None
     text = (
-        f"直接持仓层面测算的有效持仓数量（Direct Effective N）约为 {direct_effective_n:.1f}，"
-        "分布相对均衡，暂未发现明显的单一持仓集中问题。"
+        f"直接持仓层面，Direct Effective N 约为 {direct_effective_n:.1f}，"
+        "当前未触发明显的单一直接持仓集中警报。"
     )
+    if risk_confidence != "High":
+        text += "部分 ETF 穿透数据有限，真实底层集中度仍可能高于当前已识别水平。"
     return {"label": "分散程度", "text": text}
 
 
 def _asset_structure_insight(asset_allocation: dict[str, float]) -> dict | None:
     """Priority B (always attempted, second slot). Buckets the existing
-    Equity/Fixed Income/Cash/Other weights (unchanged Layer 1 output) into
-    one interpretive sentence -- current structure only, never a target or
-    recommendation to maintain it (Step 2A.6 guardrail 1)."""
+    Equity/Fixed Income/Cash-like/Cash/Other weights (unchanged Layer 1
+    output otherwise -- Step 2B.1 only splits "Fixed Income" into "Fixed
+    Income"/"Cash-like", see core.analytics.analyze) into one interpretive
+    sentence -- current structure only, never a target or recommendation to
+    maintain it (Step 2A.6 guardrail 1). No duration/correlation/hedge
+    claim is made about either bucket -- classification only."""
     equity = asset_allocation.get("Equity", 0.0)
     fixed_income = asset_allocation.get("Fixed Income", 0.0)
+    cash_like = asset_allocation.get("Cash-like", 0.0)
     cash = asset_allocation.get("Cash", 0.0)
     other = asset_allocation.get("Other", 0.0)
-    non_equity = fixed_income + cash + other
+    non_equity = fixed_income + cash_like + cash + other
     if equity <= 0 and non_equity <= 0:
         return None
+    # Name only the buckets actually present (>=5%) -- a Cash-like-only
+    # portfolio (e.g. just SGOV) must never be described as also holding
+    # Fixed Income, and vice versa.
+    present = [name for value, name in ((fixed_income, "固定收益"), (cash_like, "现金类")) if value >= 0.05]
+    non_equity_label = ("、".join(present) if len(present) > 1 else present[0]) + "资产" if present else "非股票资产"
     if equity >= 0.90 or non_equity < 0.05:
         base = "组合以股票资产为主，非股票资产占比较低"
     elif equity >= 0.50:
-        base = "组合仍以股票资产为主，同时配置了一定比例的债券与现金类资产，整体结构并非纯股票组合"
+        base = f"组合仍以股票资产为主，同时配置了{non_equity_label}，整体结构并非纯股票组合"
     elif equity >= 0.35:
-        base = "股票与债券类资产均有配置，组合结构相对均衡"
+        base = f"股票与{non_equity_label}均有配置，组合结构相对均衡"
     else:
-        base = "组合以债券与现金类资产为主，股票资产占比相对较低"
+        base = f"组合以{non_equity_label}为主，股票资产占比相对较低"
     cash_note = f"，另有约 {cash:.0%} 现金" if cash >= 0.05 else ""
     return {"label": "资产结构", "text": base + cash_note + "。"}
 
@@ -121,7 +142,7 @@ def build_portfolio_insights(result: AnalyticsResult) -> list[dict[str, str]]:
     item merely to reach 2 -- both slots can independently come back None."""
     primary = (
         _concentration_insight(result.risk_flags, result.true_exposures)
-        or _diversification_insight(result.direct_effective_n)
+        or _diversification_insight(result.direct_effective_n, result.risk_confidence)
     )
     structure = _asset_structure_insight(result.asset_allocation)
     insights = [item for item in (primary, structure) if item is not None]

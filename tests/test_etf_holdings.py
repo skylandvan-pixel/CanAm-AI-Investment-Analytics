@@ -27,11 +27,14 @@ def test_individual_stock_does_not_render():
 
 
 def test_etf_without_verified_reference_holdings_fails_closed():
-    """VHT and SGOV are canonical ETFs (see core.security_profile) but have
+    """FINN and SGOV are canonical ETFs (see core.security_profile) but have
     no entry in core.reference.ETF_HOLDINGS -- must fail closed, never a
-    fabricated constituent list."""
-    assert "VHT" not in ETF_HOLDINGS  # sanity: confirms the fixture premise
-    assert get_etf_top_holdings("VHT") is None
+    fabricated constituent list. FINN's official Fidelity factsheet
+    discloses only an aggregate top-10 weight, never individual per-holding
+    weights (see the Step 2B.1 coverage audit) -- fabricating an even split
+    would be an invented weight, so it stays uncovered."""
+    assert "FINN" not in ETF_HOLDINGS  # sanity: confirms the fixture premise
+    assert get_etf_top_holdings("FINN") is None
     assert get_etf_top_holdings("SGOV") is None
 
 
@@ -43,7 +46,7 @@ def test_no_fake_zero_holdings():
     """A None result must never be papered over with an empty-but-present
     ETFTopHoldings -- the caller (_etf_top_holdings_html) relies on None
     itself as the fail-closed signal."""
-    assert get_etf_top_holdings("VHT") is None
+    assert get_etf_top_holdings("FINN") is None
 
 
 # --- Cardinality / sorting ---------------------------------------------------

@@ -19,7 +19,7 @@ logger = logging.getLogger("canam.ai")
 
 # Exact secret env vars this app configures. Their *values* are redacted from
 # logs, never their presence -- see _redact() and _log_ai_failure().
-_SECRET_ENV_VARS = ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", "CANAM_BETA_CODES")
+_SECRET_ENV_VARS = ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", "CANAM_BETA_CODES", "TYPESAFE_API_KEY")
 
 # Generic shapes for API keys / bearer tokens, as a defense-in-depth backstop
 # in case a provider SDK ever echoes a credential back inside an exception
@@ -505,11 +505,23 @@ _TARGET_EFFECTIVE_N_PHRASES = (
     "提升至更稳健水平", "目标 Effective N", "目标Effective N", "达到合理 Effective N", "达到合理Effective N",
 )
 
+# Step 2B.1 Workstream C3: the new Fixed Income / Cash-like asset-
+# classification split is classification only -- this product has no
+# duration model and no correlation model, so a bucket's mere existence or
+# weight must never be turned into a duration, hedging-effectiveness, or
+# correlation-based behavior claim (positive OR negative -- "no hedge" is
+# just as unverifiable a claim as "hedges the market").
+_DEFENSIVE_BEHAVIOR_CLAIM_PHRASES = (
+    "零久期", "久期为零", "提供股市对冲", "作为股市对冲", "无股市对冲作用", "充分防御能力", "充分的防御能力",
+    "完全对冲股市下行风险", "对冲股市下跌风险", "提供防御性对冲",
+)
+
 _SEMANTIC_OVERREACH_PHRASE_GROUPS: dict[str, tuple[str, ...]] = {
     "unsupported maintain-current-allocation claim": _MAINTAIN_ALLOCATION_PHRASES,
     "unsupported low/negative-correlation claim": _CORRELATION_CLAIM_PHRASES,
     "unsupported reinvestment-destination recommendation": _DESTINATION_RECOMMENDATION_PHRASES,
     "unsupported target Direct Effective N claim": _TARGET_EFFECTIVE_N_PHRASES,
+    "unsupported duration/hedge/defensive-behavior claim": _DEFENSIVE_BEHAVIOR_CLAIM_PHRASES,
 }
 
 
@@ -740,6 +752,18 @@ main_concern, or chairman_decision. Do NOT change risk_level itself to compensat
 deterministic Layer 1 value already in the packet; only the interpretive wording around it carries this
 qualification when coverage is materially incomplete.
 
+Risk Confidence field (Step 2B.1): portfolio.risk_confidence is one of "High"/"Medium"/"Limited" -- a SEPARATE
+canonical dimension from risk_level, deterministically derived from the same look-through coverage state Page
+1 and Page 2 already show (never recomputed by you). risk_level answers "what does verified evidence say the
+risk is"; risk_confidence answers "how complete is that evidence" -- they must never be merged into one claim.
+When risk_confidence is "Medium" or "Limited", explicitly surface it wherever you also report risk_level (at
+least once, in chairman_decision or majority_view) using the plain Chinese labels 较高/中等/受限 for
+数据置信度 -- never print the raw English token ("High"/"Medium"/"Limited") or the raw internal field name
+(risk_confidence/lookthrough_coverage) in any user-facing text. Limited/Medium confidence must NEVER be
+silently turned into a claim that risk is therefore higher, nor may High confidence be turned into a claim
+that risk is therefore lower -- confidence describes evidence completeness, never a risk direction. Acceptable
+example: "当前风险评级为适中，但数据置信度受限：ETF 穿透覆盖有限，风险评级主要基于当前已验证数据。"
+
 Effective N scope -- concentration.direct_effective_n measures concentration across DIRECT portfolio holdings
 only (直接持仓口径的有效持仓数量) and must always be stated with that direct-holdings scope explicit
 (e.g. "直接持仓口径 Effective N 约为5.76"). By itself it must never be described or implied as overall diversification,
@@ -799,15 +823,22 @@ no such valuation metric exists anywhere in this packet -- never invent one. Nev
 "估值数据覆盖率"/"估值覆盖率"/"valuation data coverage" or any wording implying fundamental valuation
 coverage. Prefer "持仓市值计算覆盖率" -- e.g. "持仓市值计算覆盖率100%（按持仓数量）" for a value of 1.0.
 
-Asset-allocation wording (Step 2A.4): asset_allocation's keys ("Equity"/"Fixed Income"/"Cash"/"Other") are
-Layer 1 portfolio-weight buckets, not a stock/bond dichotomy -- the "Fixed Income" bucket includes cash-like
-short-duration Treasury ETFs (e.g. SGOV/CBIL), not only traditional longer-duration bonds. Never collapse it
-into "债券"/"纯债券"/"传统固定收益", and never describe the portfolio with a simple "股债" (stock/bond) framing
--- use "债券与现金类" (Bonds & Cash-like) for the Fixed Income bucket instead, e.g. "股票约70.3%，债券与现金类
-资产约28.7%". If asset_allocation also has a non-trivial Cash and/or Other weight worth mentioning, name it as
-its own separate figure using only the packet's own values (e.g. "另有约1%现金/其他资产") -- never fold Cash
-into the Fixed Income figure, and never invent or reallocate a rounding residual just to force the cited
-percentages to sum to exactly 100.
+Asset-allocation wording (Step 2A.4, split in Step 2B.1): asset_allocation's keys ("Equity"/"Fixed Income"/
+"Cash-like"/"Cash"/"Other") are Layer 1 portfolio-weight buckets, not a stock/bond dichotomy. As of Step 2B.1
+the ultra-short-duration Treasury/cash-equivalent subset (e.g. SGOV/CBIL) is its own separate "Cash-like"
+bucket, deterministically split out from "Fixed Income" -- they are DIFFERENT keys with DIFFERENT weights now,
+never the same figure, and never re-merged into one number. Refer to each by its own plain label -- "固定收益"
+for Fixed Income, "现金类" for Cash-like, e.g. "股票约64.2%，固定收益约10.3%，现金类约25.0%". Never collapse
+either into "债券"/"纯债券"/"传统固定收益"/"债券与现金类" (that combined label is retired), and never describe
+the portfolio with a simple "股债" (stock/bond) framing. This is classification only, built from each ETF's
+existing canonical security/economic classification -- no duration model, no correlation model exists in this
+product, so you may state each bucket's current weight as a fact but must NEVER claim or imply "零久期"/"久期
+为零"/"提供股市对冲"/"作为股市对冲"/"无股市对冲作用"/"充分防御能力"/"完全对冲股市下行风险"/any duration,
+hedging-effectiveness, or correlation-based behavior claim for either bucket -- e.g. never "因此具有充分防御
+能力" merely because a Cash-like or Fixed Income weight exists. If asset_allocation also has a non-trivial
+Cash and/or Other weight worth mentioning, name it as its own separate figure using only the packet's own
+values (e.g. "另有约1%现金/其他资产") -- never fold Cash into the Fixed Income or Cash-like figure, and never
+invent or reallocate a rounding residual just to force the cited percentages to sum to exactly 100.
 
 Tax-lot rule: this system has no tax-lot/share-batch history and no cost-basis-currency guarantee (see
 data_quality and the local Trade Impact Preview). Never claim or recommend which lot/batch of shares to

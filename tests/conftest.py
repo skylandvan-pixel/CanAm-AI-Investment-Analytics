@@ -70,3 +70,15 @@ def low_confidence_result(quote_factory):
     ]
     tickers = ("NVDA", "AAPL", "JPM", "XOM", "CBIL", "XLF")
     return analyze(build_snapshot(holdings, quote_factory(*tickers), cash=50))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_jev_network_by_default(monkeypatch):
+    """Ordinary pytest cannot reach the paid TypeSafe transport."""
+    from core import jev_service
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Live TypeSafe transport is forbidden in pytest")
+
+    monkeypatch.setenv("JEV_ENABLED", "false")
+    monkeypatch.setattr(jev_service, "_post", forbidden)

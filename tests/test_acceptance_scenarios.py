@@ -33,8 +33,12 @@ def test_scenario_c_mixed_hidden_overlap():
 
 
 def test_scenario_d_fixed_income_sgov():
+    """Step 2B.1 Asset Classification V2: SGOV is ultra-short-duration
+    Treasury and now classified "Cash-like", separate from "Fixed Income"
+    -- see core.analytics.analyze's CASH_LIKE_TICKERS split."""
     result = analyze(build_snapshot([HoldingInput("SGOV", 7), HoldingInput("AAPL", 3)], quotes("SGOV", "AAPL")))
-    assert result.asset_allocation["Fixed Income"] == pytest.approx(.7)
+    assert result.asset_allocation["Cash-like"] == pytest.approx(.7)
+    assert "Fixed Income" not in result.asset_allocation
     assert "SGOV" not in result.uncovered_etfs
 
 

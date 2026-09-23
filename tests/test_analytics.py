@@ -59,8 +59,11 @@ def test_missing_etf_holdings_fail_closed(quote_factory):
     assert result.uncovered_etfs == ("VXUS",)
 
 
-def test_sgov_is_fixed_income_and_not_uncovered(mixed_result):
-    assert mixed_result.asset_allocation["Fixed Income"] == pytest.approx(.30)
+def test_sgov_is_cash_like_and_not_uncovered(mixed_result):
+    """Step 2B.1 Asset Classification V2: SGOV is now bucketed "Cash-like",
+    separate from "Fixed Income" (see core.analytics.analyze)."""
+    assert mixed_result.asset_allocation["Cash-like"] == pytest.approx(.30)
+    assert "Fixed Income" not in mixed_result.asset_allocation
     assert "SGOV" not in mixed_result.uncovered_etfs
 
 

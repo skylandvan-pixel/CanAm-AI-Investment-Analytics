@@ -63,7 +63,27 @@ def test_balanced_equity_fixed_income_structure_insight():
 
 def test_fixed_income_dominant_structure_insight():
     insight = _asset_structure_insight({"Equity": 0.2, "Fixed Income": 0.8})
-    assert "以债券与现金类资产为主" in insight["text"]
+    assert "以固定收益资产为主" in insight["text"]
+
+
+def test_cash_like_only_structure_insight_never_mentions_fixed_income():
+    """Step 2B.1 accuracy fix: a portfolio with only Cash-like (e.g. just
+    SGOV), no true Fixed Income, must never claim Fixed Income is also
+    held."""
+    insight = _asset_structure_insight({"Equity": 0.75, "Cash-like": 0.25})
+    assert "现金类" in insight["text"]
+    assert "固定收益" not in insight["text"]
+
+
+def test_fixed_income_only_structure_insight_never_mentions_cash_like():
+    insight = _asset_structure_insight({"Equity": 0.75, "Fixed Income": 0.25})
+    assert "固定收益" in insight["text"]
+    assert "现金类" not in insight["text"]
+
+
+def test_both_fixed_income_and_cash_like_present_mentions_both():
+    insight = _asset_structure_insight({"Equity": 0.60, "Fixed Income": 0.20, "Cash-like": 0.20})
+    assert "固定收益" in insight["text"] and "现金类" in insight["text"]
 
 
 def test_material_cash_gets_its_own_mention():
@@ -221,15 +241,28 @@ def test_direct_effective_n_scope_not_overstated():
     """The diversification insight must scope Direct Effective N to direct
     holdings explicitly and must never claim overall/economic/factor
     diversification."""
-    insight = _diversification_insight(5.76)
+    insight = _diversification_insight(5.76, "High")
     assert "直接持仓层面" in insight["text"]
     assert "Direct Effective N" in insight["text"]
-    for forbidden in ("整体分散", "经济分散", "因子分散", "真实分散"):
+    assert "单一直接持仓集中" in insight["text"]
+    for forbidden in ("整体分散", "经济分散", "因子分散", "真实分散", "分布相对均衡"):
         assert forbidden not in insight["text"]
 
 
 def test_diversification_insight_none_without_positions():
-    assert _diversification_insight(None) is None
+    assert _diversification_insight(None, "High") is None
+
+
+def test_diversification_insight_appends_limitation_when_confidence_not_high():
+    """Step 2B.1: when risk_confidence is not "High" (materially incomplete
+    equity-ETF look-through), the insight must append the coverage
+    limitation clause rather than implying full certainty."""
+    limited = _diversification_insight(5.76, "Limited")
+    assert "部分 ETF 穿透数据有限" in limited["text"]
+    medium = _diversification_insight(5.76, "Medium")
+    assert "部分 ETF 穿透数据有限" in medium["text"]
+    high = _diversification_insight(5.76, "High")
+    assert "部分 ETF 穿透数据有限" not in high["text"]
 
 
 # --- Current fact vs target / recommendation leakage ---------------------------

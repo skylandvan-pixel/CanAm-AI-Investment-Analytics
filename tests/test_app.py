@@ -726,17 +726,19 @@ def test_risk_level_value_is_chinese_only_no_english_suffix():
         assert english not in joined
 
 
-def test_asset_allocation_uses_bonds_and_cash_like_label():
-    """UI label change only -- demo portfolio holds SGOV (Fixed Income),
-    so the donut legend must show the renamed bilingual label."""
+def test_asset_allocation_uses_cash_like_label_for_sgov():
+    """Step 2B.1 Asset Classification V2: the demo portfolio holds SGOV,
+    now classified "Cash-like" (not merged into a broad "Bonds & Cash-like"
+    Fixed Income bucket) -- the donut legend must show the split bilingual
+    label, and never fall back to the old combined wording."""
     import json
 
     app = _app()
     assert not app.exception
     donut = next(c for c in app.get("plotly_chart") if c.key == "chart_asset_allocation")
     labels = json.loads(donut.proto.spec)["data"][0]["labels"]
-    assert any("债券与现金类" in label and "Bonds & Cash-like" in label for label in labels)
-    assert not any("固定收益" in label for label in labels)
+    assert any("现金类" in label and "Cash-like" in label for label in labels)
+    assert not any("债券与现金类" in label or "Bonds & Cash-like" in label for label in labels)
 
 
 def test_page3_free_plan_exists_with_zero_price_and_core_features():

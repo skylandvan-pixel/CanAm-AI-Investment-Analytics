@@ -49,13 +49,15 @@ def test_zsp_has_verified_holdings_and_contributes_to_nvda_true_exposure(quote_f
 
 
 def test_partial_coverage_still_surfaces_the_verified_part(quote_factory):
-    """B: VDY + VHT (unverified) + NVDA (direct, no ETF involved) -- the
-    portfolio has no verified equity-ETF look-through at all here (VDY/VHT
-    both uncovered), so true_exposures must reflect only NVDA's own direct
-    weight -- never a guessed contribution from VDY/VHT."""
-    holdings = [HoldingInput("VDY", 50), HoldingInput("VHT", 50), HoldingInput("NVDA", 10)]
-    result = analyze(build_snapshot(holdings, quote_factory("VDY", "VHT", "NVDA")))
-    assert {"VDY", "VHT"} <= set(result.uncovered_etfs)
+    """B: FINN + XLV (both unverified -- see the Step 2B.1 coverage audit:
+    FINN's official factsheet discloses no per-holding weights, and XLV has
+    no reference-holdings entry) + NVDA (direct, no ETF involved) -- the
+    portfolio has no verified equity-ETF look-through at all here, so
+    true_exposures must reflect only NVDA's own direct weight -- never a
+    guessed contribution from FINN/XLV."""
+    holdings = [HoldingInput("FINN", 50), HoldingInput("XLV", 50), HoldingInput("NVDA", 10)]
+    result = analyze(build_snapshot(holdings, quote_factory("FINN", "XLV", "NVDA")))
+    assert {"FINN", "XLV"} <= set(result.uncovered_etfs)
     nvda = next(x for x in result.true_exposures if x.ticker == "NVDA")
     assert nvda.indirect == 0
     assert nvda.true == pytest.approx(nvda.direct)
@@ -63,11 +65,11 @@ def test_partial_coverage_still_surfaces_the_verified_part(quote_factory):
 
 def test_partial_coverage_with_one_verified_and_one_unverified_etf(quote_factory):
     """B (extended): mixing a verified ETF (ZSP) with an unverified one
-    (VHT) must still show ZSP's verified contribution -- partial coverage,
+    (FINN) must still show ZSP's verified contribution -- partial coverage,
     not zero coverage."""
-    holdings = [HoldingInput("ZSP", 100), HoldingInput("VHT", 100), HoldingInput("NVDA", 10)]
-    result = analyze(build_snapshot(holdings, quote_factory("ZSP", "VHT", "NVDA")))
-    assert "VHT" in result.uncovered_etfs
+    holdings = [HoldingInput("ZSP", 100), HoldingInput("FINN", 100), HoldingInput("NVDA", 10)]
+    result = analyze(build_snapshot(holdings, quote_factory("ZSP", "FINN", "NVDA")))
+    assert "FINN" in result.uncovered_etfs
     assert "ZSP" not in result.uncovered_etfs
     nvda = next(x for x in result.true_exposures if x.ticker == "NVDA")
     assert nvda.indirect > 0  # from ZSP alone
@@ -94,16 +96,31 @@ def test_unknown_etf_holdings_fail_closed_never_guessed(quote_factory):
 
 
 def test_exact_reported_portfolio_has_partial_verified_lookthrough(quote_factory):
-    """The exact P0 portfolio: ZSP is now verified and contributes NVDA/AAPL/
-    etc true exposure; FINN/VDY/VHT stay correctly uncovered (fail closed).
-    Page 2 must therefore show partial results, never the old blanket
-    "no verified ETF look-through" message."""
+    """The exact P0 portfolio, updated for Step 2B.1's coverage expansion:
+    ZSP was already verified; VDY and VHT are now ALSO verified (official
+    Vanguard issuer factsheets, see core.reference.ETF_HOLDINGS) and
+    contribute their own indirect exposure. FINN alone stays correctly
+    uncovered (fail closed -- its official Fidelity factsheet discloses no
+    individual per-holding weights, only an aggregate). Page 2 must
+    therefore show BROADER partial results than before this step, never the
+    old blanket "no verified ETF look-through" message, and never silently
+    drop FINN's fail-closed status."""
     holdings = [
         HoldingInput("CBIL", 3218), HoldingInput("ZSP", 1250), HoldingInput("FINN", 3500),
         HoldingInput("VDY", 900), HoldingInput("XSB", 2500), HoldingInput("NVDA", 150), HoldingInput("VHT", 100),
     ]
     result = analyze(build_snapshot(holdings, quote_factory("CBIL", "ZSP", "FINN", "VDY", "XSB", "NVDA", "VHT"), account_currency="CAD", usd_cad=1.36))
     exposure_with_indirect = [x for x in result.true_exposures if x.indirect > 0]
-    assert exposure_with_indirect, "ZSP's verified holdings must produce at least one indirect exposure"
-    assert {"FINN", "VDY", "VHT"} <= set(result.uncovered_etfs)
+    assert exposure_with_indirect, "ZSP/VDY/VHT's verified holdings must produce at least one indirect exposure"
+    assert result.uncovered_etfs == ("FINN",)
     assert "ZSP" not in result.uncovered_etfs
+    assert "VDY" not in result.uncovered_etfs
+    assert "VHT" not in result.uncovered_etfs
+    # VDY's own top constituent (Royal Bank of Canada, RY) and VHT's own top
+    # constituent (Eli Lilly, LLY) must now show up as verified indirect
+    # exposure -- proving the NEW coverage actually flows into True Exposure,
+    # not just into result.uncovered_etfs shrinking.
+    ry = next((x for x in result.true_exposures if x.ticker == "RY"), None)
+    lly = next((x for x in result.true_exposures if x.ticker == "LLY"), None)
+    assert ry is not None and ry.indirect > 0
+    assert lly is not None and lly.indirect > 0

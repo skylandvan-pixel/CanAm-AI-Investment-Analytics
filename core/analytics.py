@@ -71,6 +71,13 @@ def build_snapshot(
     return PortfolioSnapshot(account_currency, cash, positions, total, cash / total, coverage, account_type=normalize_account_type(account_type))
 
 
+# Step 2B.1: the single canonical mapping from lookthrough_coverage to
+# risk_confidence -- Page 1 (KPI), Page 2 (disclosure wording), and Page 3
+# (AI fact packet) all read AnalyticsResult.risk_confidence rather than each
+# recomputing their own coverage-based threshold.
+_RISK_CONFIDENCE_BY_COVERAGE = {"complete": "High", "partial": "Medium", "insufficient": "Limited"}
+
+
 def _effective_n(weights: list[float]) -> float | None:
     denominator = sum(w * w for w in weights if w > 0)
     return 1 / denominator if denominator else None
@@ -117,7 +124,16 @@ def analyze(snapshot: PortfolioSnapshot) -> AnalyticsResult:
         weight = p.weight or 0
         if p.ticker in ETF_META:
             sector, asset = ETF_META[p.ticker]
-            allocation[asset] += weight
+            # Step 2B.1 Asset Classification V2: split the ultra-short-
+            # duration Treasury/cash-equivalent subset of "Fixed Income" into
+            # its own "Cash-like" allocation bucket (reuses CASH_LIKE_TICKERS
+            # unchanged -- the same set core.analytics._score already keys
+            # its liquidity term off of, so _score's formula/behavior is
+            # untouched). sector grouping (used only by the sector-
+            # concentration risk flag/_score) is deliberately NOT split --
+            # that dimension is orthogonal to this classification.
+            allocation_key = "Cash-like" if asset == "Fixed Income" and p.ticker in CASH_LIKE_TICKERS else asset
+            allocation[allocation_key] += weight
             sectors[sector] += weight
             if asset == "Equity":
                 constituents = ETF_HOLDINGS.get(p.ticker)
@@ -149,6 +165,15 @@ def analyze(snapshot: PortfolioSnapshot) -> AnalyticsResult:
     covered_equity_etf_weight = sum(direct[t] for t in ETF_HOLDINGS if t in direct)
     uncovered_weight = sum(direct[t] for t in uncovered)
     coverage = "complete" if not uncovered else ("partial" if uncovered_weight < .15 else "insufficient")
+    # Step 2B.1: risk_confidence is a separate dimension from risk_level --
+    # it never changes what the risk assessment IS, only how complete the
+    # verified evidence behind it is. Deterministically mapped from the same
+    # lookthrough_coverage state Page 2's own disclosure already uses (no
+    # new/duplicated threshold): "complete" here means every held equity ETF
+    # has SOME reference data, never exhaustive constituent coverage, so it
+    # maps to "High" (relatively higher confidence), never a "complete"/
+    # exhaustive-sounding label.
+    risk_confidence = _RISK_CONFIDENCE_BY_COVERAGE[coverage]
     direct_n = _effective_n([p.weight or 0 for p in positions] + ([snapshot.cash_weight] if snapshot.cash_weight else []))
     lookthrough_n = _effective_n(list(lookthrough_vector.values()))
 
@@ -179,7 +204,7 @@ def analyze(snapshot: PortfolioSnapshot) -> AnalyticsResult:
         "chairman": "ai.chairman", "action_plan": "ai.action_plan",
     }
     return AnalyticsResult(
-        snapshot, score, risk_level, dict(allocation), dict(sectors), tuple(ranked[:8]), exposures,
+        snapshot, score, risk_level, risk_confidence, dict(allocation), dict(sectors), tuple(ranked[:8]), exposures,
         top3, top5, direct_n, lookthrough_n, coverage, tuple(sorted(uncovered)), tuple(flags),
         summary, canonical,
         {"valuation_coverage": snapshot.coverage_ratio, "lookthrough_covered_weight": covered_equity_etf_weight,
@@ -208,7 +233,8 @@ def canonical_fact_packet(result: AnalyticsResult) -> dict:
     return {
         "portfolio": {"account_currency": result.snapshot.account_currency, "account_type": result.snapshot.account_type,
                       "portfolio_score": result.portfolio_score,
-                      "risk_level": result.risk_level, "total_assets": round(result.snapshot.total_assets, 2)},
+                      "risk_level": result.risk_level, "risk_confidence": result.risk_confidence,
+                      "total_assets": round(result.snapshot.total_assets, 2)},
         "asset_allocation": {k: clean(v) for k, v in result.asset_allocation.items()},
         "top_direct_holdings": [{"ticker": t, "weight": clean(w)} for t, w in result.top_direct[:5]],
         "top_true_exposures": [{"ticker": x.ticker, "direct": clean(x.direct), "indirect": clean(x.indirect), "true": clean(x.true)} for x in result.true_exposures[:8]],

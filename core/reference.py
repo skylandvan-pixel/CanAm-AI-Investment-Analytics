@@ -24,7 +24,40 @@ ETF_HOLDINGS: dict[str, dict[str, float]] = {
     "VUG": {"AAPL": .095, "MSFT": .090, "NVDA": .090, "AMZN": .060, "META": .040, "AVGO": .035, "GOOGL": .030, "GOOG": .026, "TSLA": .025, "NFLX": .020},
     "MTUM": {"NVDA": .060, "META": .045, "AVGO": .040, "NFLX": .035, "JPM": .030},
     "SPMO": {"NVDA": .050, "AVGO": .045, "JPM": .040, "META": .035, "TSLA": .030},
+    # Step 2B.1 coverage expansion -- official issuer factsheet, "Top 10
+    # holdings (% of net asset value)", source: Vanguard Investments Canada
+    # Inc., https://fund-docs.vanguard.com/VDY_FTSE_Canadian_High_Dividend_
+    # Yield_Index_ETF_9560_FS_EN_CA.pdf ("Factsheet | July 31, 2026",
+    # doc ref F9330EN_CA_072026). Top 10 total per the factsheet: 69.3%.
+    # Canadian-listed constituents, bare tickers per this project's existing
+    # ETF_HOLDINGS convention (no exchange suffix, matching how US
+    # constituents are stored above).
+    "VDY": {
+        "RY": .159, "TD": .109, "BMO": .069, "ENB": .064, "CM": .059, "BNS": .059,
+        "CNQ": .053, "SU": .043, "MFC": .040, "TRP": .038,
+    },
+    # Step 2B.1 coverage expansion -- official issuer factsheet, "Ten
+    # largest holdings and % of total net assets", source: The Vanguard
+    # Group, Inc., https://workplace.vanguard.com/assets/corp/
+    # fund_communications/pdf_publish/us-products/fact-sheet/F0956.pdf
+    # ("As of June 30, 2026", doc ref F0956_062026). Top 10 total per the
+    # factsheet: 52.3%.
+    "VHT": {
+        "LLY": .142, "JNJ": .089, "ABBV": .066, "UNH": .056, "MRK": .047,
+        "AMGN": .029, "TMO": .027, "ABT": .023, "GILD": .023, "ISRG": .021,
+    },
 }
+
+# Step 2B.1 audit finding: FINN (Fidelity Global Innovators ETF Series L)
+# remains deliberately UNCOVERED. Fidelity's own official factsheet
+# (https://www.fidelity.ca/content/dam/fidelity/en/documents/etf/
+# fact-sheet-finn-en.pdf, "Top 10 holdings as at June 30, 2026") publishes
+# only the ranked constituent names plus one aggregate "Top ten holdings
+# aggregate 57.4%" figure -- no individual per-holding weight is disclosed
+# anywhere in the official document. Fabricating a per-holding split (even
+# an even split of 57.4%) would be an invented weight, not verified data --
+# fail closed instead per this step's sourcing rule. Revisit only if
+# Fidelity ever publishes individual constituent weights.
 
 ETF_META = {
     "VOO": ("Broad Market", "Equity"), "SPY": ("Broad Market", "Equity"),
@@ -63,14 +96,19 @@ CASH_LIKE_TICKERS = {"SGOV", "CBIL"}
 
 # Chinese-first display names for asset-class keys used throughout core/analytics.py
 # and core/models.py. Keys are the canonical English identifiers the scoring and
-# allocation logic keys off of; only the display string is localized here. The
-# "Fixed Income" bucket keeps its canonical key (scoring/thresholds are
-# unchanged) -- only its user-facing label reads "Bonds & Cash-like", since
-# it holds bonds, T-bills, and other cash-like instruments (e.g. CBIL, XSB,
-# SGOV), not literally "cash" (which is its own separate bucket).
+# allocation logic keys off of; only the display string is localized here.
+#
+# Step 2B.1 Asset Classification V2: "Fixed Income" and "Cash-like" are now
+# separate allocation buckets (core.analytics.analyze splits them using this
+# same CASH_LIKE_TICKERS set -- SGOV/CBIL are ultra-short-duration Treasury
+# instruments economically closer to cash than to duration-bearing bonds;
+# XSB/SHY/AGG/BND/TLT remain "Fixed Income"). Before this step both were
+# combined under one "Bonds & Cash-like" label, hiding the structural
+# difference -- see the Step 2B.1 report. This is classification only: no
+# duration/correlation/hedge claim is implied by either label.
 ASSET_CLASS_LABELS_ZH = {
-    "Equity": "股票", "Fixed Income": "债券与现金类", "Cash": "现金", "Other": "其他",
+    "Equity": "股票", "Fixed Income": "固定收益", "Cash-like": "现金类", "Cash": "现金", "Other": "其他",
 }
 ASSET_CLASS_LABELS_EN = {
-    "Equity": "Equity", "Fixed Income": "Bonds & Cash-like", "Cash": "Cash", "Other": "Other",
+    "Equity": "Equity", "Fixed Income": "Fixed Income", "Cash-like": "Cash-like", "Cash": "Cash", "Other": "Other",
 }

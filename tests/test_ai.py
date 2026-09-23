@@ -2434,15 +2434,17 @@ def test_prompt_forbids_fundamental_valuation_coverage_wording():
 
 # --- D: asset allocation -----------------------------------------------------
 
-def test_prompt_fixed_income_described_as_bonds_and_cash_like():
-    """11: the Fixed Income bucket must be presented to ordinary users as
-    债券与现金类 (Bonds & Cash-like), reflecting that it includes cash-like
-    Treasury ETFs (SGOV/CBIL), not a pure-bond category."""
+def test_prompt_fixed_income_described_as_固定收益_and_cash_like_split_out():
+    """11, updated for Step 2B.1: the old combined 债券与现金类 (Bonds &
+    Cash-like) label is retired -- Fixed Income is now presented plainly as
+    固定收益, and the ultra-short-duration Treasury ETFs (SGOV/CBIL) are
+    called out as their own separate 现金类 (Cash-like) bucket."""
     from core.ai import _prompt
 
     text = _prompt({})
-    assert "债券与现金类" in text
+    assert "固定收益" in text and "现金类" in text
     assert "SGOV" in text and "CBIL" in text
+    assert "that combined label is retired" in text
 
 
 def test_prompt_forbids_collapsing_fixed_income_into_plain_bonds():
@@ -2457,12 +2459,14 @@ def test_prompt_forbids_collapsing_fixed_income_into_plain_bonds():
 
 def test_prompt_keeps_cash_and_other_separate_from_fixed_income():
     """12: actual Cash/Other must be named as their own separate figure, not
-    folded into the Fixed Income ("Bonds & Cash-like") figure."""
+    folded into the Fixed Income or Cash-like figure (Step 2B.1: the old
+    combined "Bonds & Cash-like" bucket is now split into separate Fixed
+    Income and Cash-like buckets, so this rule now names both)."""
     from core.ai import _prompt
 
     text = _prompt({})
-    normalized = " ".join(text.split())
-    assert "never fold Cash into the Fixed Income figure" in normalized.lower() or "never fold cash into the fixed income figure" in normalized.lower()
+    normalized = " ".join(text.split()).lower()
+    assert "never fold cash into the fixed income or cash-like figure" in normalized
 
 
 def test_prompt_forbids_forcing_allocation_percentages_to_sum_to_100():
