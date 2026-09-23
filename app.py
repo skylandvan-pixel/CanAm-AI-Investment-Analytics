@@ -10,8 +10,11 @@ from dotenv import load_dotenv
 from core.ai import ProviderUnavailable, run_ai_analysis
 from core.analytics import analyze, build_snapshot
 from core.auth import configured_beta_codes, validate_beta_code
+from core.committee_context import build_jev_context
 from core.demo import DEMO_HOLDINGS, DEMO_QUOTES
 from core.importers import auto_map_columns, build_preview, missing_required_fields, read_portfolio_file, template_csv_bytes
+from core.jev_service import evaluate as evaluate_jev
+from core.jev_state import current_market_state as jev_current_market_state
 from core.market import fetch_quotes, fetch_usd_cad_rate
 from core.models import ACCOUNT_TYPES, HoldingInput
 from ui import brand_header, committee_view, inject_theme, overview, page_disclaimer, risk_page
@@ -269,12 +272,26 @@ else:
                 # distinguish a transient 503 from every other failure mode,
                 # without ever storing the raw exception text/details.
                 st.session_state.ai_error_status = getattr(exc, "code", None)
+            if st.session_state.ai_result:
+                # Optional, read-only external decision context (Jev/TypeSafe
+                # Phase 2 wiring): never passed to run_ai_analysis above, so it
+                # cannot influence the committee's prompt, scores, or
+                # chairman_decision. evaluate_jev() is itself fail-open (see
+                # core.jev_service) and never raises, but this stays wrapped
+                # so a Jev-side failure can never break committee rendering.
+                try:
+                    st.session_state.jev_context = build_jev_context(evaluate_jev(jev_current_market_state))
+                except Exception:
+                    st.session_state.jev_context = {
+                        "available": False, "status": "unavailable", "summary": None,
+                        "confidence": None, "signals": None, "reason": "internal_error",
+                    }
         if st.session_state.ai_result:
             committee_view(
                 st.session_state.ai_result, holdings=holdings, quotes=st.session_state.quotes,
                 cash=st.session_state.cash, account_currency=st.session_state.account_currency,
                 usd_cad=st.session_state.usd_cad, account_type=st.session_state.account_type,
-                before_result=result,
+                before_result=result, jev_context=st.session_state.get("jev_context"),
             )
         elif st.session_state.get("ai_error"):
             if st.session_state.get("ai_error_status") == 503:

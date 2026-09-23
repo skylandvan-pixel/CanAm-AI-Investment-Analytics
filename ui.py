@@ -20,7 +20,13 @@ from core.trade_preview import build_trade_impact_preview
 BLUE = ["#16283B", "#24405C", "#3B6690", "#6A8CA3", "#9FB8C9", "#D6E2EA"]
 RISK = "#C92A2A"
 RISK_LEVEL_LABELS = {"High": "高", "Elevated": "偏高", "Measured": "适中"}
-DONUT_COLORS = {"Equity": "#3B6690", "Fixed Income": "#24405C", "Cash": "#16283B", "Other": "#6A8CA3"}
+# Step 2B.1: a separate dimension from Risk Level -- see
+# AnalyticsResult.risk_confidence. "High" is the unremarkable default (no
+# qualifier shown in the KPI); Medium/Limited are surfaced inline so Page 1
+# never reads more certain than Page 2/Page 3 when look-through coverage is
+# materially incomplete.
+RISK_CONFIDENCE_LABELS_ZH = {"High": "较高", "Medium": "中等", "Limited": "受限"}
+DONUT_COLORS = {"Equity": "#3B6690", "Fixed Income": "#24405C", "Cash-like": "#9FB8C9", "Cash": "#16283B", "Other": "#6A8CA3"}
 
 
 def inject_theme() -> None:
@@ -361,10 +367,17 @@ def _market_regime_html(snapshot) -> str:
 
 
 def overview(result: AnalyticsResult) -> None:
+    # Step 2B.1: Risk Level itself is unchanged; when risk_confidence is not
+    # "High" (equity-ETF look-through coverage is materially incomplete), a
+    # compact "· 数据受限/中等" qualifier is appended in the SAME KPI cell --
+    # no new KPI card, no extra height (see the Step 2B.1 report, B6).
+    risk_value = RISK_LEVEL_LABELS.get(result.risk_level, result.risk_level)
+    if result.risk_confidence != "High":
+        risk_value += f" · 数据{RISK_CONFIDENCE_LABELS_ZH.get(result.risk_confidence, result.risk_confidence)}"
     metrics = [
         ("投资组合评分（Portfolio Score）", f"{result.portfolio_score:.0f}/100"),
         ("投资组合市值（Portfolio Value）", f"{result.snapshot.account_currency} {result.snapshot.total_assets:,.0f}"),
-        ("风险等级（Risk Level）", RISK_LEVEL_LABELS.get(result.risk_level, result.risk_level)),
+        ("风险等级（Risk Level）", risk_value),
         ("前三大持仓占比（Top 3 Holdings）", f"{result.top3_concentration:.1%}"),
     ]
     items = ''.join(f'<div class="metric-item"><div class="metric-label">{label}</div><div class="metric-value">{value}</div></div>' for label, value in metrics)
@@ -498,7 +511,7 @@ ROLE_LABELS = {
 
 def committee_view(
     ai_result, *, holdings=None, quotes=None, cash=None, account_currency=None,
-    usd_cad=None, account_type=None, before_result=None,
+    usd_cad=None, account_type=None, before_result=None, jev_context=None,
 ) -> None:
     """Step 2A.10 decision-first hierarchy: Chairman Decision renders first,
     immediately followed by the action-oriented Action Plan sections (see
@@ -528,6 +541,14 @@ def committee_view(
             for col, member in zip(cols, ai_result.members[offset:offset + 2]):
                 col.markdown(f'<div class="quiet-card member"><div class="member-role">{ROLE_LABELS[member.role]}</div><div class="member-stance">{member.stance}</div><div class="member-copy">{member.conclusion}</div></div>', unsafe_allow_html=True)
         st.markdown(f'<div class="quiet-card" style="margin-top:1rem"><b>多数意见（Majority View）</b><br>{ai_result.majority_view}<br><br><b>主要关切（Main Concern）</b><br>{ai_result.main_concern}</div>', unsafe_allow_html=True)
+    # Jev/TypeSafe Phase 2 wiring: a single lightweight reference line, hidden
+    # whenever Jev is disabled/unavailable (never an error message) -- see
+    # core.committee_context.build_jev_context. Deliberately placed last, so
+    # it never disrupts the decision-first Chairman/Action Plan hierarchy
+    # above, and never duplicates committee content.
+    if jev_context and jev_context.get("available"):
+        summary = jev_context.get("summary")
+        st.caption(f"Jev 外部决策参考：{summary}" if summary else "Jev 外部决策参考：可用")
 
 
 _PRIORITY_CSS = {"高": "ap-priority-high", "中高": "ap-priority-medhigh", "中": "ap-priority-med", "低": "ap-priority-low"}
